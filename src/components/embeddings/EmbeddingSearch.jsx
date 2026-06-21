@@ -44,6 +44,15 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
   const [hasSearched, setHasSearched] = useState(false)
   const [hoveredNode, setHoveredNode] = useState(null)
   
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
+  const [showAddDoc, setShowAddDoc] = useState(false)
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768)
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+  
   const canvasRef = useRef(null)
   const wrapperRef = useRef(null)
   const nodesRef = useRef([])
@@ -199,22 +208,25 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
         ctx.fillText('Search Query', cx, cy - 14)
       }
 
-      // 3. Update and draw nodes physics
+      // 3. Update and draw nodes physics (gravitational similarity mapping)
       nodes.forEach(n => {
         const dx = n.x - cx
         const dy = n.y - cy
         const dist = Math.sqrt(dx*dx + dy*dy) || 1
 
         // Target distance based on cosine similarity
+        // Formula: TargetRadius = (1.0 - CosineSimilarityScore) * MaxRadius (240px)
+        // High similarity matches pull close to center, low matches float outward
         const simScore = Math.max(0, n.score)
         const targetD = hasSearched ? (1 - simScore) * 240 : n.baseDistance
 
         // Elastic gravitational force towards target distance
+        // Accelerates the document node towards its similarity radius
         const force = (targetD - dist) * 0.08
         n.vx += (dx / dist) * force
         n.vy += (dy / dist) * force
 
-        // Add orbital baseline velocity if not searched to make them float around
+        // Add orbital baseline velocity if not searched to make them float around (astronomy effect)
         if (!hasSearched) {
           const orbitSpeed = 0.15
           n.vx += -Math.sin(n.baseAngle + t * orbitSpeed) * 0.04
@@ -472,9 +484,8 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
           <select 
             value={selectedModel}
             onChange={handleModelChange}
-            className="field-input"
+            className="field-input model-select-dropdown"
             style={{
-              minWidth: '240px',
               padding: '6px 32px 6px 12px',
               fontSize: '11px',
               color: 'var(--amber-c)',
@@ -511,54 +522,56 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
       </div>
 
       {/* Sub-header Bar: Onboarding Steps */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        padding: '10px 24px',
-        backgroundColor: 'rgba(12, 10, 8, 0.4)',
-        backdropFilter: 'blur(10px)',
-        WebkitBackdropFilter: 'blur(10px)',
-        borderBottom: '1px solid var(--border-subtle)',
-        fontSize: '11px',
-        fontFamily: "'JetBrains Mono', monospace",
-        zIndex: 2
-      }}>
-        {/* Step Indicator */}
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', opacity: currentStep === 1 ? 1 : 0.5 }}>
-            <span style={{ color: currentStep === 1 ? 'var(--amber-c)' : 'var(--text-secondary)', fontWeight: 600 }}>1. Select Model</span>
-          </div>
-          
-          <div style={{ color: 'var(--text-dim)' }}>→</div>
+      {!isMobile && (
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          padding: '10px 24px',
+          backgroundColor: 'rgba(12, 10, 8, 0.4)',
+          backdropFilter: 'blur(10px)',
+          WebkitBackdropFilter: 'blur(10px)',
+          borderBottom: '1px solid var(--border-subtle)',
+          fontSize: '11px',
+          fontFamily: "'JetBrains Mono', monospace",
+          zIndex: 2
+        }}>
+          {/* Step Indicator */}
+          <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', opacity: currentStep === 1 ? 1 : 0.5 }}>
+              <span style={{ color: currentStep === 1 ? 'var(--amber-c)' : 'var(--text-secondary)', fontWeight: 600 }}>1. Select Model</span>
+            </div>
+            
+            <div style={{ color: 'var(--text-dim)' }}>→</div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', opacity: currentStep === 2 ? 1 : 0.5 }}>
-            <span style={{ color: currentStep === 2 ? 'var(--accent-amber)' : 'var(--text-secondary)', fontWeight: 600 }}>
-              2. Analyze Documents ({corpus.filter(c => c.embedding).length}/{corpus.length})
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', opacity: currentStep === 2 ? 1 : 0.5 }}>
+              <span style={{ color: currentStep === 2 ? 'var(--accent-amber)' : 'var(--text-secondary)', fontWeight: 600 }}>
+                2. Analyze Documents ({corpus.filter(c => c.embedding).length}/{corpus.length})
+              </span>
+            </div>
+
+            <div style={{ color: 'var(--text-dim)' }}>→</div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', opacity: currentStep === 3 ? 1 : 0.5 }}>
+              <span style={{ color: currentStep === 3 ? '#00ff87' : 'var(--text-secondary)', fontWeight: 600 }}>3. Search Similarity</span>
+            </div>
           </div>
 
-          <div style={{ color: 'var(--text-dim)' }}>→</div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', opacity: currentStep === 3 ? 1 : 0.5 }}>
-            <span style={{ color: currentStep === 3 ? '#00ff87' : 'var(--text-secondary)', fontWeight: 600 }}>3. Search Similarity</span>
-          </div>
+          {/* Explainer Toggle Button */}
+          <button 
+            onClick={() => setShowExplainer(!showExplainer)}
+            className="btn"
+            style={{
+              padding: '4px 10px', fontSize: '10px',
+              borderColor: showExplainer ? 'rgba(245, 169, 61, 0.35)' : undefined,
+              color: showExplainer ? 'var(--amber-c)' : undefined,
+              background: showExplainer ? 'rgba(245, 169, 61, 0.08)' : undefined
+            }}
+          >
+            {showExplainer ? 'Hide Explanation' : 'How does this work?'}
+          </button>
         </div>
-
-        {/* Explainer Toggle Button */}
-        <button 
-          onClick={() => setShowExplainer(!showExplainer)}
-          className="btn"
-          style={{
-            padding: '4px 10px', fontSize: '10px',
-            borderColor: showExplainer ? 'rgba(245, 169, 61, 0.35)' : undefined,
-            color: showExplainer ? 'var(--amber-c)' : undefined,
-            background: showExplainer ? 'rgba(245, 169, 61, 0.08)' : undefined
-          }}
-        >
-          {showExplainer ? 'Hide Explanation' : 'How does this work?'}
-        </button>
-      </div>
+      )}
 
       {/* Onboarding Explainer Panel */}
       {showExplainer && (
@@ -584,10 +597,10 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
       )}
 
       {/* Main Split Layout */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', zIndex: 1 }}>
+      <div className="embeddings-split" style={{ flex: 1, display: 'flex', overflow: 'hidden', zIndex: 1 }}>
         
         {/* Left Side: Vector Space Map Visualizer */}
-        <div ref={wrapperRef} style={{ flex: 1.3, position: 'relative', borderRight: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column' }}>
+        <div ref={wrapperRef} className="embeddings-map-panel" style={{ flex: 1.3, position: 'relative', borderRight: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column' }}>
           
           <div style={{
             position: 'absolute',
@@ -710,7 +723,7 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
         </div>
 
         {/* Right Side: List Details Drawer */}
-        <div style={{
+        <div className="embeddings-list-panel" style={{
           flex: 0.9,
           display: 'flex',
           flexDirection: 'column',
@@ -722,40 +735,70 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
           
           {/* Custom Corpus Input Section */}
           <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-subtle)', backgroundColor: 'rgba(255,255,255,0.01)' }}>
-            <span style={{ fontSize: '9.5px', fontFamily: "'JetBrains Mono', monospace", color: 'var(--accent-phosphor)', letterSpacing: '0.08em', display: 'block', marginBottom: '8px', fontWeight: 700 }}>
-              + Add Custom Document
-            </span>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <input 
-                type="text"
-                value={customText}
-                onChange={e => setCustomText(e.target.value)}
-                placeholder="Type custom document text here..."
-                className="field-input"
-                style={{
-                  flex: 1,
-                  padding: '6px 12px',
-                  fontSize: '11px',
-                }}
-                onKeyDown={e => { if (e.key === 'Enter') handleAddCorpus() }}
-              />
+            {isMobile && !showAddDoc ? (
               <button 
-                onClick={handleAddCorpus}
-                disabled={!customText.trim() || isInitializing}
-                className="btn btn-primary"
+                onClick={() => setShowAddDoc(true)}
+                className="btn"
                 style={{
-                  padding: '0 16px',
+                  width: '100%',
+                  padding: '8px',
                   fontSize: '11px',
-                  height: '32px',
-                  borderColor: 'rgba(0, 255, 135, 0.35)',
+                  fontFamily: "'JetBrains Mono', monospace",
                   color: 'var(--accent-phosphor)',
-                  backgroundColor: 'rgba(0, 255, 135, 0.08)',
-                  boxShadow: 'var(--clay-shadow-btn)'
+                  borderColor: 'rgba(0, 255, 135, 0.2)',
+                  background: 'rgba(0, 255, 135, 0.03)'
                 }}
               >
-                Add
+                + Add Custom Document
               </button>
-            </div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <span style={{ fontSize: '9.5px', fontFamily: "'JetBrains Mono', monospace", color: 'var(--accent-phosphor)', letterSpacing: '0.08em', fontWeight: 700 }}>
+                    + Add Custom Document
+                  </span>
+                  {isMobile && (
+                    <button 
+                      onClick={() => setShowAddDoc(false)}
+                      style={{ background: 'none', border: 'none', color: 'var(--text-dim)', fontSize: '10px', cursor: 'pointer' }}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <input 
+                    type="text"
+                    value={customText}
+                    onChange={e => setCustomText(e.target.value)}
+                    placeholder="Type custom document text here..."
+                    className="field-input"
+                    style={{
+                      flex: 1,
+                      padding: '6px 12px',
+                      fontSize: '11px',
+                    }}
+                    onKeyDown={e => { if (e.key === 'Enter') { handleAddCorpus(); if (isMobile) setShowAddDoc(false); } }}
+                  />
+                  <button 
+                    onClick={() => { handleAddCorpus(); if (isMobile) setShowAddDoc(false); }}
+                    disabled={!customText.trim() || isInitializing}
+                    className="btn btn-primary"
+                    style={{
+                      padding: '0 16px',
+                      fontSize: '11px',
+                      height: '32px',
+                      borderColor: 'rgba(0, 255, 135, 0.35)',
+                      color: 'var(--accent-phosphor)',
+                      backgroundColor: 'rgba(0, 255, 135, 0.08)',
+                      boxShadow: 'var(--clay-shadow-btn)'
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

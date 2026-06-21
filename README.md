@@ -86,3 +86,10 @@ An advanced multi-modal inspection lab:
 This project is optimized to run serverless on **Netlify**:
 - Environment keys are stored securely using Netlify's secret management (`VITE_NVIDIA_API_KEY`).
 - Continuous integration is set up via GitHub: every push to `main` automatically triggers a production build.
+
+---
+
+## 📘 Developer & System Documentation
+
+For detailed information on the codebase, architecture diagrams, and mathematical implementations (such as Cosine Similarity vector equations, animated sinusoidal wave physics, and coordinate transforms), please refer to the comprehensive manual:
+👉 **[DEVELOPER_DOCUMENTATION.md](DEVELOPER_DOCUMENTATION.md)**

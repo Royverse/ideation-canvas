@@ -309,10 +309,10 @@ export function ChatArena({ apiKey, models, selectedModelId, setSelectedModelId 
             MODEL
           </span>
           <select
-            className="field-input"
+            className="field-input model-select-dropdown"
             value={selectedModel}
             onChange={handleModelChange}
-            style={{ minWidth: '260px', padding: '6px 32px 6px 10px', fontSize: '11px', color: 'var(--amber-c)' }}
+            style={{ padding: '6px 32px 6px 10px', fontSize: '11px', color: 'var(--amber-c)' }}
           >
             {chatModels.length === 0
               ? <option>Loading models…</option>
@@ -439,7 +439,7 @@ export function ChatArena({ apiKey, models, selectedModelId, setSelectedModelId 
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKey}
-                placeholder="Type your message here... (Enter to send, Shift+Enter for newline)"
+                placeholder={isMobile ? "Type a message..." : "Type your message here... (Enter to send, Shift+Enter for newline)"}
                 rows={Math.min(5, (input.match(/\n/g) || []).length + 1)}
                 style={{ paddingLeft: '28px', lineHeight: 1.5 }}
               />

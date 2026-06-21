@@ -808,4 +808,65 @@ input[type=range]::-webkit-slider-thumb:hover {
     right: 12px !important;
     width: auto !important;
   }
+
+  /* Responsive dropdown sizes */
+  .model-select-dropdown {
+    min-width: 130px !important;
+    max-width: 180px !important;
+  }
+
+  /* Reasoning engine mobile overrides */
+  .cognitive-label {
+    display: none !important;
+  }
+  .reasoning-chain-panel {
+    border-right: none !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
+    flex: 1 1 50% !important;
+  }
+  .reasoning-answer-panel {
+    flex: 1 1 50% !important;
+  }
+
+  /* Embeddings mobile overrides */
+  .embeddings-map-panel {
+    width: 100% !important;
+    height: 300px !important;
+    border-right: none !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
+  }
+  .embeddings-list-panel {
+    width: 100% !important;
+    flex: 1 !important;
+  }
+
+  /* Story View mobile overrides */
+  .story-container {
+    padding: 20px 16px !important;
+    gap: 20px !important;
+  }
+  .story-container .glass-card {
+    padding: 16px 20px !important;
+  }
+  .host-grid {
+    grid-template-columns: 1fr !important;
+  }
 }
+
+/* Global utility classes (non-media query defaults) */
+.model-select-dropdown {
+  min-width: 260px;
+}
+.story-container {
+  padding: 40px 24px;
+  max-height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  max-width: 900px;
+  margin: 0 auto;
+  box-sizing: border-box;
+  width: 100%;
+}
+

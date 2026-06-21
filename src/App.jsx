@@ -14,17 +14,7 @@ import { useModels } from './hooks/useModels'
 
 function StoryView() {
   return (
-    <div style={{
-      padding: '40px 24px',
-      maxHeight: '100%',
-      overflowY: 'auto',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '32px',
-      maxWidth: '900px',
-      margin: '0 auto',
-      boxSizing: 'border-box'
-    }}>
+    <div className="story-container">
       <style>{`
         @keyframes flow-right {
           to { stroke-dashoffset: -20; }
@@ -113,7 +103,10 @@ function StoryView() {
           display: 'flex',
           justifyContent: 'center',
           alignItems: 'center',
-          overflowX: 'auto'
+          overflowX: 'auto',
+          width: '100%',
+          maxWidth: '100%',
+          boxSizing: 'border-box'
         }}>
           <svg width="680" height="150" viewBox="0 0 680 150" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ minWidth: '600px' }}>
             {/* Definitions for Glow Filters */}

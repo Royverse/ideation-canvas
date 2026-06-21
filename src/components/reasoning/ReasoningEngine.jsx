@@ -41,7 +41,10 @@ function ThinkingWave({ active }) {
         ctx.lineWidth   = wave.w
         ctx.beginPath()
         for (let x = 0; x < canvas.width; x++) {
+          // Dampening function keeping wave edges bound to the left/right canvas boundaries
+          // Formula: Dampening = sin((x / Width) * PI)
           const damp = Math.sin((x / canvas.width) * Math.PI)
+          // Wave equation: y = baseline + sin(x * frequency + phase + offset) * amplitude * dampening
           const y = canvas.height / 2 + Math.sin(x * freq + phase + wave.off) * amp * damp
           x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
         }
@@ -72,6 +75,13 @@ export function ReasoningEngine({ apiKey, models, selectedModelId, setSelectedMo
   const [elapsed, setElapsed]           = useState(0)
   const timerRef                        = useRef(null)
   const endRef                          = useRef(null)
+  const [isMobile, setIsMobile]         = useState(window.innerWidth < 768)
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768)
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
 
   const reasoningModels = models.filter(m => m.category === 'reasoning')
 
@@ -144,12 +154,12 @@ export function ReasoningEngine({ apiKey, models, selectedModelId, setSelectedMo
 
       {/* Top bar */}
       <div className="top-bar" style={{ zIndex: 2 }}>
-        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9.5px', color: 'var(--text-dim)', letterSpacing: '0.08em' }}>COGNITIVE MODEL</span>
+        <span className="cognitive-label" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9.5px', color: 'var(--text-dim)', letterSpacing: '0.08em' }}>COGNITIVE MODEL</span>
         <select
-          className="field-input"
+          className="field-input model-select-dropdown"
           value={selectedModel}
           onChange={handleModelChange}
-          style={{ minWidth: '240px', padding: '6px 32px 6px 10px', fontSize: '11px', color: 'var(--amber-c)' }}
+          style={{ padding: '6px 32px 6px 10px', fontSize: '11px', color: 'var(--amber-c)' }}
         >
           {reasoningModels.length === 0
             ? <option>Loading models…</option>
@@ -225,9 +235,9 @@ export function ReasoningEngine({ apiKey, models, selectedModelId, setSelectedMo
           )}
 
           {/* Split: chain of thought | final answer */}
-          <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+          <div className="reasoning-split" style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
             {/* Left: Chain of thought */}
-            <div style={{
+            <div className="reasoning-chain-panel" style={{
               flex: 1, borderRight: '1px solid var(--border-subtle)',
               padding: '24px', overflowY: 'auto',
               background: 'rgba(200, 112, 42, 0.01)',
@@ -279,7 +289,7 @@ export function ReasoningEngine({ apiKey, models, selectedModelId, setSelectedMo
             </div>
 
             {/* Right: Final answer */}
-            <div style={{ flex: 1, padding: '24px', overflowY: 'auto', background: 'rgba(12, 10, 8, 0.1)', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div className="reasoning-answer-panel" style={{ flex: 1, padding: '24px', overflowY: 'auto', background: 'rgba(12, 10, 8, 0.1)', display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9px', fontWeight: 600, letterSpacing: '0.15em', color: 'var(--text-dim)' }}>
                 ANSWER
               </div>
@@ -346,7 +356,7 @@ export function ReasoningEngine({ apiKey, models, selectedModelId, setSelectedMo
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKey}
-              placeholder="Ask a logical or mathematical question... (Enter to send)"
+              placeholder={isMobile ? "Ask a question..." : "Ask a logical or mathematical question... (Enter to send)"}
               rows={Math.min(5, (input.match(/\n/g) || []).length + 1)}
               style={{ paddingLeft: '34px' }}
             />

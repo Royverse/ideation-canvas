@@ -89,7 +89,7 @@ export function CodeLab({ apiKey, models, selectedModelId, setSelectedModelId })
   const [temperature, setTemperature]   = useState(0.3)
   const [maxTokens, setMaxTokens]       = useState(2048)
   const [systemPrompt, setSystemPrompt] = useState('You are an expert software engineering assistant. Write clean, well-documented, high-performance code. Focus on correctness and edge cases.')
-  const [showParams, setShowParams]     = useState(true)
+  const [showParams, setShowParams]     = useState(() => window.innerWidth >= 768)
   const [activeTab, setActiveTab]       = useState('code')   // code | chat
   const [activeBlockId, setActiveBlockId] = useState(1)
   const [fileName, setFileName]         = useState('solution.js')
@@ -299,10 +299,10 @@ export function CodeLab({ apiKey, models, selectedModelId, setSelectedModelId })
           <div style={{ width: '1px', height: '16px', background: 'var(--border-subtle)' }} />
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9.5px', color: 'var(--text-dim)', letterSpacing: '0.08em' }}>CODER</span>
           <select
-            className="field-input"
+            className="field-input model-select-dropdown"
             value={selectedModel}
             onChange={handleModelChange}
-            style={{ minWidth: '260px', padding: '6px 32px 6px 10px', fontSize: '11px', color: 'var(--amber-c)' }}
+            style={{ padding: '6px 32px 6px 10px', fontSize: '11px', color: 'var(--amber-c)' }}
           >
             {codeModels.length === 0
               ? <option>Loading models…</option>
@@ -411,7 +411,7 @@ export function CodeLab({ apiKey, models, selectedModelId, setSelectedModelId })
                     value={input}
                     onChange={e => setInput(e.target.value)}
                     onKeyDown={handleKey}
-                    placeholder="Code request… (Enter to send)"
+                    placeholder={isMobile ? "Code request..." : "Code request… (Enter to send)"}
                     rows={Math.min(4, (input.match(/\n/g) || []).length + 1)}
                     style={{ paddingLeft: '26px' }}
                   />
