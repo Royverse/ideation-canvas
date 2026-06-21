@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="none" viewBox="0 0 32 32">
+  <!-- Outer glowing circle -->
+  <circle cx="16" cy="16" r="14" stroke="#5b21b6" stroke-width="1.5" stroke-opacity="0.3" />
+  <!-- Dynamic network connections (constellation/galaxy theme) -->
+  <line x1="8" y1="16" x2="16" y2="8" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" />
+  <line x1="16" y1="8" x2="24" y2="16" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round" />
+  <line x1="24" y1="16" x2="16" y2="24" stroke="#5b21b6" stroke-width="1.5" stroke-linecap="round" />
+  <line x1="16" y1="24" x2="8" y2="16" stroke="#5b21b6" stroke-width="1.5" stroke-linecap="round" />
+  <line x1="8" y1="16" x2="24" y2="16" stroke="#7c3aed" stroke-width="1" stroke-dasharray="2 2" />
+  <line x1="16" y1="8" x2="16" y2="24" stroke="#7c3aed" stroke-width="1" stroke-dasharray="2 2" />
+  <!-- Core nodes -->
+  <circle cx="16" cy="8" r="3" fill="#a78bfa" />
+  <circle cx="24" cy="16" r="3" fill="#ddd6fe" />
+  <circle cx="16" cy="24" r="3" fill="#5b21b6" />
+  <circle cx="8" cy="16" r="3" fill="#7c3aed" />
+  <circle cx="16" cy="16" r="4.5" fill="#a78bfa" />
+  <circle cx="16" cy="16" r="2" fill="#ffffff" />
+</svg>
