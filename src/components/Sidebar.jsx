@@ -73,7 +73,7 @@ export function Sidebar({ currentView, setView, mobileOpen, setMobileOpen }) {
       {/* Footer Controls */}
       <div>
         <a 
-          href="https://github.com/Royverse/milkyway.ai" 
+          href="https://github.com/Royverse/ideation-canvas" 
           target="_blank" 
           rel="noopener noreferrer"
           className="raw-nav-item" 

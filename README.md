@@ -54,8 +54,8 @@ An advanced multi-modal inspection lab:
 
 1. **Clone the Repository:**
    ```bash
-   git clone https://github.com/Royverse/milkyway.ai.git
-   cd milkyway.ai
+   git clone https://github.com/Royverse/ideation-canvas.git
+   cd ideation-canvas
    ```
 
 2. **Install Dependencies:**
