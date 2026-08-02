@@ -1,42 +1,69 @@
-import { useState, useEffect } from 'react'
+/**
+ * @file useApiKey.js
+ * @description Resolves the NVIDIA NIM API key from the build environment or
+ * from browser storage, and exposes save/clear controls.
+ */
 
+import { useCallback, useState } from 'react'
+
+const STORAGE_KEY = 'nim_api_key'
+
+/**
+ * Reads the key once, synchronously, so the app never flashes the key modal to
+ * someone who already has a key. Environment wins over stored keys: a key baked
+ * in at build time is a deliberate deployment choice.
+ *
+ * @returns {{key: string, fromEnv: boolean}} Resolved key state.
+ */
+function readInitialKey() {
+  const envKey = import.meta.env.VITE_NVIDIA_API_KEY
+  if (envKey) return { key: envKey, fromEnv: true }
+
+  try {
+    return { key: localStorage.getItem(STORAGE_KEY) || '', fromEnv: false }
+  } catch {
+    // Storage blocked (private mode, embedded frame) — fall back to the modal.
+    return { key: '', fromEnv: false }
+  }
+}
+
+/**
+ * Manages the active API key for the session.
+ *
+ * @returns {{
+ *   apiKey: string,
+ *   isReady: boolean,
+ *   isFromEnv: boolean,
+ *   saveKey: (key: string) => void,
+ *   clearKey: () => void
+ * }} Key state and controls. `isReady` gates the rest of the app.
+ */
 export function useApiKey() {
-  const [apiKey, setApiKey] = useState('')
-  const [isReady, setIsReady] = useState(false)
-  const [isFromEnv, setIsFromEnv] = useState(false)
+  const [{ key, fromEnv }, setKeyState] = useState(readInitialKey)
 
-  useEffect(() => {
-    // Try env first
-    const envKey = import.meta.env.VITE_NVIDIA_API_KEY
-    if (envKey) {
-      setApiKey(envKey)
-      setIsReady(true)
-      setIsFromEnv(true)
-      return
+  const saveKey = useCallback((newKey) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, newKey)
+    } catch {
+      // Key still works for this session, it just will not survive a reload.
     }
-
-    // Try localStorage
-    const stored = localStorage.getItem('nim_api_key')
-    if (stored) {
-      setApiKey(stored)
-      setIsReady(true)
-      setIsFromEnv(false)
-    }
+    setKeyState({ key: newKey, fromEnv: false })
   }, [])
 
-  const saveKey = (key) => {
-    localStorage.setItem('nim_api_key', key)
-    setApiKey(key)
-    setIsReady(true)
-    setIsFromEnv(false)
-  }
+  const clearKey = useCallback(() => {
+    try {
+      localStorage.removeItem(STORAGE_KEY)
+    } catch {
+      // Nothing stored to remove.
+    }
+    setKeyState({ key: '', fromEnv: false })
+  }, [])
 
-  const clearKey = () => {
-    localStorage.removeItem('nim_api_key')
-    setApiKey('')
-    setIsReady(false)
-    setIsFromEnv(false)
+  return {
+    apiKey: key,
+    isReady: Boolean(key),
+    isFromEnv: fromEnv,
+    saveKey,
+    clearKey,
   }
-
-  return { apiKey, isReady, saveKey, clearKey, isFromEnv }
 }

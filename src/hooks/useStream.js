@@ -1,109 +1,137 @@
 /**
  * @file useStream.js
- * @description Custom React hook managing real-time chat and reasoning stream states.
- * Orchestrates sending queries, maintaining history, appending partial token streams,
- * and handling connection lifetimes.
+ * @description Drives a streaming conversation: sends a turn, appends tokens as
+ * they arrive, and lets the user stop generation mid-flight.
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { isAbortError } from '../api/nvidia'
 
 /**
- * Custom hook to consume and manage an asynchronous token generator stream.
- * 
- * @param {Function} streamFn - Asynchronous generator function (e.g. streamChat or streamReasoning).
- * @param {string} apiKey - The active user authorization key.
- * @returns {Object} Object containing message history, streaming states, sender callbacks, and resetters.
+ * Consumes an async token generator into conversation state.
+ *
+ * Works with both `streamChat` (which yields plain strings) and
+ * `streamReasoning` (which yields `{type, content}` fragments), routing
+ * reasoning fragments to a separate `reasoning` field on the message so the UI
+ * can show thinking and answer side by side.
+ *
+ * @param {Function} streamFn - Async generator, e.g. `streamChat` or `streamReasoning`.
+ * @param {string} apiKey - NVIDIA NIM API token.
+ * @returns {{
+ *   messages: Array,
+ *   isStreaming: boolean,
+ *   error: string|null,
+ *   send: (model: string, userMessage: string, params?: Object) => Promise<void>,
+ *   stop: () => void,
+ *   clearMessages: () => void,
+ *   setMessages: Function
+ * }} Conversation state and controls.
  */
 export function useStream(streamFn, apiKey) {
   const [messages, setMessages] = useState([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState(null)
 
-  // Maintain a mutable ref pointing to the latest state
-  // This allows the stale-closure-free callback 'send' to read current messages
+  // `send` reads history at call time without listing `messages` as a
+  // dependency, which would rebuild the callback on every token.
   const messagesRef = useRef(messages)
-  useEffect(() => {
-    messagesRef.current = messages
-  }, [messages])
+  useEffect(() => { messagesRef.current = messages }, [messages])
+
+  // Holds the controller for the request currently in flight, if any.
+  const abortRef = useRef(null)
+
+  /** Cancels the active request. Safe to call when nothing is streaming. */
+  const stop = useCallback(() => {
+    abortRef.current?.abort()
+    abortRef.current = null
+  }, [])
+
+  // Abandon any in-flight request when the workspace unmounts.
+  useEffect(() => stop, [stop])
 
   /**
-   * Dispatches a message payload, initializes placeholders, and streams responses.
-   * 
-   * @param {string} model - Target model identifier.
-   * @param {string} userMessage - Prompt content.
-   * @param {Object} extraParams - Settings like temperature, max_tokens, or systemPrompt.
+   * Sends one turn and streams the reply into the last assistant message.
+   *
+   * @param {string} model - Model id to send to.
+   * @param {string} userMessage - The user's prompt.
+   * @param {Object} [params] - Extra request options. `systemPrompt` is lifted
+   *   out and prepended once, at the start of a conversation; everything else
+   *   passes through to the API (temperature, max_tokens, …).
    */
-  const send = useCallback(async (model, userMessage, extraParams = {}) => {
-    if (!apiKey) return
-    
+  const send = useCallback(async (model, userMessage, params = {}) => {
+    if (!apiKey || !model) return
+
+    stop() // Never run two generations into the same transcript.
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setIsStreaming(true)
     setError(null)
-    
+
     const userMsg = { role: 'user', content: userMessage }
-    const aiMsg = { role: 'assistant', content: '', reasoning: '', isStreaming: true }
-    
-    // Capture state immediately before adding new items
     const history = [...messagesRef.current]
-    
-    // Add user question and empty AI bubble simultaneously to optimize render passes
-    setMessages(prev => [...prev, userMsg, aiMsg])
 
-    const { systemPrompt, ...apiParams } = extraParams
-    // Inject system instructions if history is empty
+    // Show the question and an empty reply together, so the user sees the turn
+    // land in one frame rather than two.
+    setMessages((prev) => [
+      ...prev,
+      userMsg,
+      { role: 'assistant', content: '', reasoning: '', isStreaming: true },
+    ])
+
+    const { systemPrompt, ...apiParams } = params
     if (history.length === 0 && systemPrompt) {
-      history.push({ role: 'system', content: systemPrompt })
+      history.unshift({ role: 'system', content: systemPrompt })
     }
-    
-    try {
-      // Map history to standard API payload parameters, removing local state variables
-      const cleanedMessages = [...history, userMsg].map(({ role, content }) => ({ role, content }))
 
-      const generator = streamFn(apiKey, { 
-        model, 
-        messages: cleanedMessages,
-        ...apiParams
+    /** Applies a token to the assistant message currently being written. */
+    const appendToReply = (apply) => {
+      setMessages((prev) => {
+        if (prev.length === 0) return prev
+        const next = [...prev]
+        const last = { ...next[next.length - 1] }
+        apply(last)
+        next[next.length - 1] = last
+        return next
+      })
+    }
+
+    try {
+      // Strip UI-only fields (`reasoning`, `isStreaming`) before sending.
+      const payload = [...history, userMsg].map(({ role, content }) => ({ role, content }))
+
+      const generator = streamFn(apiKey, {
+        model,
+        messages: payload,
+        signal: controller.signal,
+        ...apiParams,
       })
 
-      // Standard generator consumption block
       for await (const chunk of generator) {
-        setMessages(prev => {
-          const newMessages = [...prev]
-          const lastMsg = { ...newMessages[newMessages.length - 1] }
-          
-          if (typeof chunk === 'string') {
-            // Standard Chat completions (raw text tokens)
-            lastMsg.content += chunk
-          } else if (chunk.type === 'thinking') {
-            // Reasoning steps (DeepSeek <think> chunks)
-            lastMsg.reasoning += chunk.content
-          } else if (chunk.type === 'answer') {
-            // Reasoning responses (DeepSeek answer chunks)
-            lastMsg.content += chunk.content
-          }
-          
-          newMessages[newMessages.length - 1] = lastMsg
-          return newMessages
-        })
+        if (typeof chunk === 'string') {
+          appendToReply((msg) => { msg.content += chunk })
+        } else if (chunk.type === 'thinking') {
+          appendToReply((msg) => { msg.reasoning += chunk.content })
+        } else if (chunk.type === 'answer') {
+          appendToReply((msg) => { msg.content += chunk.content })
+        }
       }
     } catch (err) {
-      setError(err.message)
+      // A stop is a deliberate action, not a failure — keep what streamed in.
+      if (!isAbortError(err)) setError(err.message)
     } finally {
+      if (abortRef.current === controller) abortRef.current = null
       setIsStreaming(false)
-      // Toggle final streaming states on the active assistant message card
-      setMessages(prev => {
-        const newMessages = [...prev]
-        const lastMsg = { ...newMessages[newMessages.length - 1] }
-        lastMsg.isStreaming = false
-        newMessages[newMessages.length - 1] = lastMsg
-        return newMessages
-      })
+      appendToReply((msg) => { msg.isStreaming = false })
     }
-  }, [apiKey, streamFn])
+  }, [apiKey, streamFn, stop])
 
-  /**
-   * Empties the current conversation state array.
-   */
-  const clearMessages = () => setMessages([])
+  /** Clears the transcript, cancelling anything still streaming. */
+  const clearMessages = useCallback(() => {
+    stop()
+    setError(null)
+    setMessages([])
+  }, [stop])
 
-  return { messages, isStreaming, error, send, clearMessages, setMessages }
+  return { messages, isStreaming, error, send, stop, clearMessages, setMessages }
 }
