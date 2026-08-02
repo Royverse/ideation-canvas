@@ -237,7 +237,7 @@ function StoryView() {
 }
 
 function App() {
-  const { apiKey, isReady, isFromEnv, saveKey, clearKey } = useApiKey()
+  const { apiKey, isReady, isFromEnv, isTrial, saveKey, clearKey } = useApiKey()
   const { models, isLoading, error } = useModels(apiKey, isReady)
   const [currentView, setView] = useState('constellation')
   const [selectedModelId, setSelectedModelId] = useState(null)
@@ -279,11 +279,12 @@ function App() {
         setView={setView}
         mobileOpen={mobileOpen}
         setMobileOpen={setMobileOpen}
+        isTrial={isTrial}
         onSignOut={isFromEnv ? null : clearKey}
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-        <StatusBar models={models} />
+        <StatusBar models={models} isTrial={isTrial} />
 
         {isLoading && (
           <div className="app-loading" role="status">

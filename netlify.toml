@@ -2,6 +2,20 @@
   command = "npm run build"
   publish = "dist"
 
+[functions]
+  directory = "netlify/functions"
+
+# The trial gateway. Requests arrive with no credentials; the function attaches
+# the deployment's own key server-side, so it never reaches the browser. Set
+# NVIDIA_TRIAL_API_KEY in the Netlify environment to switch the trial on — with
+# it unset the function answers 503 and the UI offers only the own-key path.
+# Must be declared before the /api/nvidia rule so it is not shadowed.
+[[redirects]]
+  from = "/api/trial/*"
+  to = "/.netlify/functions/trial/:splat"
+  status = 200
+  force = true
+
 # The NIM gateway sends no CORS headers, so the browser cannot call it directly.
 # This rewrite makes every /api/nvidia/* request same-origin; Netlify forwards
 # it server-side with the Authorization header intact.

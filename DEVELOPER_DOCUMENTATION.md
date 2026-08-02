@@ -36,13 +36,16 @@ The application contains six workspaces:
 ### Module map
 
 ```
+netlify/functions/
+└── trial.mjs              Shared-key gateway: attaches the trial key server-side
+
 src/
 ├── api/nvidia.js          Gateway client: SSE parsing, streaming, cancellation
 ├── theme.js               Palette for canvas code (CSS vars do not work there)
 ├── hooks/                 useApiKey, useModels, useStream, useModelPicker,
 │                          useStreamTelemetry, useMediaQuery
-├── lib/                   providers (model → publisher), errors (message → guidance),
-│                          clipboard
+├── lib/                   gateway (key → route), providers (model → publisher),
+│                          errors (message → guidance), clipboard
 ├── components/
 │   ├── shared/            ModelSelect, MarkdownMessage, StreamTelemetry
 │   └── <workspace>/       One directory per workspace
@@ -58,13 +61,15 @@ The application operates as a Serverless Single Page Application (SPA). Because 
 ### Request Lifecycle Flow
 ```mermaid
 graph TD
-    A[User Browser React App] -->|1. Request /api/nvidia/*| B[Netlify Proxy / CORS rewrite]
-    B -->|2. Forward Request| C{Gateway Resolver}
+    A[User Browser React App] -->|Own key: /api/nvidia/*| B[Netlify Proxy / CORS rewrite]
+    A -->|Trial: /api/trial/*, no credentials| F[Netlify Function trial.mjs]
+    F -->|Attaches NVIDIA_TRIAL_API_KEY| B
+    B -->|Forward Request| C{Gateway Resolver}
     C -->|If Cloud NIM API| D[NVIDIA Cloud NIM Registry]
     C -->|If Local / VPS NIM API| E[Self-Hosted VPS Model Runner]
-    D -->|3. SSE Stream Yield| B
-    E -->|3. SSE Stream Yield| B
-    B -->|4. CORS Bypass Response| A
+    D -->|SSE Stream Yield| B
+    E -->|SSE Stream Yield| B
+    B -->|CORS Bypass Response| A
 ```
 
 ### Serverless Rewrite Definition
@@ -79,6 +84,26 @@ In [netlify.toml](netlify.toml), a rewrite route transparently maps all `/api/nv
 ```
 
 During local development, the Vite server uses built-in proxy overrides matching the same routing schema to prevent CORS blockages.
+
+### The trial gateway
+
+A second route, `/api/trial/*`, exists so a visitor with no NVIDIA account can still use the app. It is rewritten to [trial.mjs](netlify/functions/trial.mjs) rather than to NVIDIA, because the credential must not travel through the browser:
+
+```toml
+[[redirects]]
+  from = "/api/trial/*"
+  to = "/.netlify/functions/trial/:splat"
+  status = 200
+  force = true
+```
+
+The function reads `NVIDIA_TRIAL_API_KEY` from the server environment — deliberately *without* a `VITE_` prefix, so Vite cannot inline it into the bundle — builds a fresh header set (nothing the client sent is forwarded, least of all an `Authorization` header it may have supplied), and streams the upstream response body straight back so SSE still arrives token by token.
+
+Because the endpoint takes no credentials, it is open to whoever finds it. The function bounds the damage rather than pretending otherwise: a three-route allowlist, a 512-token ceiling on generation, a 4 MB body limit, and a per-IP rate limit of 150/minute and 700/hour held in instance memory. The per-minute figure is set above the startup health sweep's burst (~100 probes, five at a time) so the sweep does not throttle itself into false verdicts. Netlify may keep several instances warm, so the counters are a brake, not a guarantee — the dependable ceiling is the quota on the key itself.
+
+Which route a request takes is decided in [gateway.js](src/lib/gateway.js) from the active key: a real `nvapi-…` key resolves to `/api/nvidia` with an `Authorization` header, and the trial sentinel resolves to `/api/trial` with none. Both [nvidia.js](src/api/nvidia.js) and the health [probe.js](src/lib/health/probe.js) build their requests through it, which is why nothing else in the app has a branch for trial mode.
+
+`npm run dev` approximates the function with a Vite proxy that attaches the same key; `npx netlify dev` runs the real one, caps and all.
 
 ---
 
@@ -243,7 +268,7 @@ state beyond the API key and the model catalog.
 
 | Hook | Responsibility |
 | --- | --- |
-| [useApiKey.js](src/hooks/useApiKey.js) | Resolves the key from `import.meta.env` or `localStorage`, synchronously on first render so the key modal never flashes for someone who already has one. |
+| [useApiKey.js](src/hooks/useApiKey.js) | Resolves the key from `import.meta.env` or `localStorage`, synchronously on first render so the key modal never flashes for someone who already has one. Stores the trial sentinel the same way, so choosing the trial survives a reload. |
 | [useModels.js](src/hooks/useModels.js) | Fetches the catalog, decorates each entry with category and context window, and caches it per key. |
 | [useStream.js](src/hooks/useStream.js) | Owns the transcript: sends a turn, appends tokens, exposes `stop()`. |
 | [useModelPicker.js](src/hooks/useModelPicker.js) | Resolves which model a workspace is using. |
@@ -345,7 +370,15 @@ npm run dev
 The server will boot, by default routing local proxy redirects to:
 👉 `http://localhost:5173/`
 
-### 3. Production Build
+### 3. Trial Key (optional)
+To switch on the "try it now" button, set the server-side key. On the deployment:
+```bash
+npx netlify env:set NVIDIA_TRIAL_API_KEY "nvapi-…"
+```
+Locally, add `NVIDIA_TRIAL_API_KEY=nvapi-…` to `.env`. With it unset the button
+reports that the trial is switched off and the own-key path is unaffected.
+
+### 4. Production Build
 Compile the minified assets bundle:
 ```bash
 npm run build

@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useState } from 'react'
+import { TRIAL_KEY, isTrialKey } from '../lib/gateway'
 
 const STORAGE_KEY = 'nim_api_key'
 
@@ -12,6 +13,9 @@ const STORAGE_KEY = 'nim_api_key'
  * Reads the key once, synchronously, so the app never flashes the key modal to
  * someone who already has a key. Environment wins over stored keys: a key baked
  * in at build time is a deliberate deployment choice.
+ *
+ * The trial sentinel is stored the same way a real key is, so choosing the
+ * trial survives a reload just as pasting a key does.
  *
  * @returns {{key: string, fromEnv: boolean}} Resolved key state.
  */
@@ -34,7 +38,9 @@ function readInitialKey() {
  *   apiKey: string,
  *   isReady: boolean,
  *   isFromEnv: boolean,
+ *   isTrial: boolean,
  *   saveKey: (key: string) => void,
+ *   startTrial: () => void,
  *   clearKey: () => void
  * }} Key state and controls. `isReady` gates the rest of the app.
  */
@@ -50,6 +56,12 @@ export function useApiKey() {
     setKeyState({ key: newKey, fromEnv: false })
   }, [])
 
+  /**
+   * Switches to the shared trial key. Nothing secret is stored: the sentinel is
+   * a routing marker, and the real key stays on the server.
+   */
+  const startTrial = useCallback(() => saveKey(TRIAL_KEY), [saveKey])
+
   const clearKey = useCallback(() => {
     try {
       localStorage.removeItem(STORAGE_KEY)
@@ -63,7 +75,9 @@ export function useApiKey() {
     apiKey: key,
     isReady: Boolean(key),
     isFromEnv: fromEnv,
+    isTrial: isTrialKey(key),
     saveKey,
+    startTrial,
     clearKey,
   }
 }

@@ -44,7 +44,7 @@ function useApiCallCount() {
   return count
 }
 
-export function Sidebar({ currentView, setView, mobileOpen, setMobileOpen, onSignOut }) {
+export function Sidebar({ currentView, setView, mobileOpen, setMobileOpen, isTrial, onSignOut }) {
   const apiCalls = useApiCallCount()
   const { summary, sweep } = useHealth()
 
@@ -64,7 +64,7 @@ export function Sidebar({ currentView, setView, mobileOpen, setMobileOpen, onSig
           </svg>
           milkyway.ai
         </span>
-        <span className="sidebar-sub">NVIDIA NIM</span>
+        <span className="sidebar-sub">{isTrial ? 'NVIDIA NIM · trial' : 'NVIDIA NIM'}</span>
       </div>
 
       <div style={{ flex: 1 }}>
@@ -120,8 +120,13 @@ export function Sidebar({ currentView, setView, mobileOpen, setMobileOpen, onSig
             <span className="sidebar-status-value">{apiCalls}</span>
           </div>
           {onSignOut && (
-            <button type="button" className="btn" onClick={onSignOut} style={{ padding: '5px 10px', fontSize: '9px' }}>
-              Change key
+            <button
+              type="button"
+              className={isTrial ? 'btn btn-primary' : 'btn'}
+              onClick={onSignOut}
+              style={{ padding: '5px 10px', fontSize: '9px' }}
+            >
+              {isTrial ? 'Use my own key' : 'Change key'}
             </button>
           )}
         </div>

@@ -8,28 +8,22 @@
  * client works unchanged against a self-hosted NIM container, vLLM, or Ollama —
  * only the rewrite target changes.
  *
+ * A visitor on the shared trial key is routed to `/api/trial/*` instead, which
+ * is authorised server-side. `gateway.js` makes that choice; nothing here needs
+ * to know which one it got.
+ *
  * Streaming responses arrive as Server-Sent Events. All four streaming helpers
  * share one parser (`streamSSE`) so buffering and delta extraction live in a
  * single place.
  */
 
-const BASE_URL = '/api/nvidia'
+import { gatewayBase, gatewayHeaders } from '../lib/gateway'
 
 /** Storage key for the running count of requests made from this browser. */
 const API_CALL_COUNTER_KEY = 'milkyway_api_calls'
 
 /** Window event the sidebar listens to so the request counter stays live. */
 export const API_CALL_EVENT = 'milkyway_api_call'
-
-/**
- * Builds the authorization and content headers for a gateway request.
- * @param {string} apiKey - NVIDIA NIM API token (`nvapi-…`).
- * @returns {Record<string, string>} Header map.
- */
-const headers = (apiKey) => ({
-  'Content-Type': 'application/json',
-  'Authorization': `Bearer ${apiKey}`,
-})
 
 /**
  * Increments the local request counter and notifies listeners.
@@ -77,7 +71,7 @@ export const isAbortError = (err) =>
 /**
  * POSTs to the gateway and returns the raw response, throwing on failure.
  * @param {string} path - Path below the gateway root, e.g. `/chat/completions`.
- * @param {string} apiKey - NVIDIA NIM API token.
+ * @param {string} apiKey - NVIDIA NIM API token, or the trial sentinel.
  * @param {Object} body - JSON request payload.
  * @param {string} errorPrefix - Context for a thrown error.
  * @param {AbortSignal} [signal] - Cancels the in-flight request.
@@ -85,9 +79,9 @@ export const isAbortError = (err) =>
  */
 async function post(path, apiKey, body, errorPrefix, signal) {
   trackApiCall()
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await fetch(`${gatewayBase(apiKey)}${path}`, {
     method: 'POST',
-    headers: headers(apiKey),
+    headers: gatewayHeaders(apiKey),
     body: JSON.stringify(body),
     signal,
   })
@@ -180,12 +174,15 @@ const reasoningDelta = (chunk) => {
 /**
  * Lists every model the supplied key can reach on the gateway.
  * Backs the constellation map and every model dropdown.
- * @param {string} apiKey - NVIDIA NIM API token.
+ * @param {string} apiKey - NVIDIA NIM API token, or the trial sentinel.
  * @param {AbortSignal} [signal] - Cancels the in-flight request.
  * @returns {Promise<Array<{id: string}>>} Model records.
  */
 export async function fetchModels(apiKey, signal) {
-  const res = await fetch(`${BASE_URL}/models`, { headers: headers(apiKey), signal })
+  const res = await fetch(`${gatewayBase(apiKey)}/models`, {
+    headers: gatewayHeaders(apiKey),
+    signal,
+  })
   if (!res.ok) throw await responseError(res, 'Could not load the model list')
   const data = await res.json()
   return data.data ?? []

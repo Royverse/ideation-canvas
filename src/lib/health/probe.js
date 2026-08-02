@@ -25,7 +25,7 @@
  * 14 models that passed the entitlement probe answered a real request.
  */
 
-const BASE_URL = '/api/nvidia'
+import { gatewayBase, gatewayHeaders } from '../gateway'
 
 /**
  * Health states, ordered from most to least usable. `rank` drives sorting in
@@ -71,11 +71,6 @@ const LIVENESS_TIMEOUT_MS = 25000
 /** Above this, a model works but is worth warning about. */
 export const SLOW_MS = 6000
 
-const headers = (apiKey) => ({
-  'Content-Type': 'application/json',
-  Authorization: `Bearer ${apiKey}`,
-})
-
 /** Embedding and reranking models answer on a different endpoint. */
 const isEmbeddingModel = (id) => /embed|rerank|retriev/i.test(id)
 
@@ -95,9 +90,9 @@ async function attempt(path, body, apiKey, timeoutMs, signal) {
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
 
   try {
-    const res = await fetch(`${BASE_URL}${path}`, {
+    const res = await fetch(`${gatewayBase(apiKey)}${path}`, {
       method: 'POST',
-      headers: headers(apiKey),
+      headers: gatewayHeaders(apiKey),
       body: JSON.stringify(body),
       signal: combined,
     })

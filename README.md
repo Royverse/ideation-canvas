@@ -9,6 +9,11 @@ Because NIM is OpenAI-compatible, the same client code works unchanged against
 NVIDIA's hosted gateway, a self-hosted NIM container, vLLM, or Ollama. Only the
 proxy target changes.
 
+**No key? Press "Try it now" on the first screen.** The deployment lends you its
+own key through a server-side function, so you can walk the whole app before
+deciding whether to sign up for anything. It is shared and rate limited; connect
+your own key when you want the full catalog and uncapped replies.
+
 ---
 
 ## The six workspaces
@@ -72,18 +77,30 @@ testing, this app's own default.
 ## Architecture
 
 ```
-Browser  ──/api/nvidia/*──▶  proxy  ──▶  https://integrate.api.nvidia.com/v1/*
-                              │
-                              └────────▶  your own NIM / vLLM / Ollama endpoint
+                 your key, from the browser
+Browser  ──/api/nvidia/*──▶  rewrite   ──▶  https://integrate.api.nvidia.com/v1/*
+                                 │
+                                 └───────▶  your own NIM / vLLM / Ollama endpoint
+
+                 the trial key, never in the browser
+Browser  ──/api/trial/*───▶  function  ──▶  https://integrate.api.nvidia.com/v1/*
+                             + Bearer NVIDIA_TRIAL_API_KEY
 ```
 
 The NIM gateway sends no CORS headers, so the browser cannot call it directly.
-Every request goes to a same-origin `/api/nvidia/*` path that gets rewritten:
+Every request goes to a same-origin path that gets rewritten:
 
 - **Locally** by the `server.proxy` block in [`vite.config.js`](vite.config.js)
-- **In production** by the redirect in [`netlify.toml`](netlify.toml)
+- **In production** by the redirects in [`netlify.toml`](netlify.toml)
 
 To point the app at your own endpoint, change the target in both places.
+
+Which of the two paths a request takes is decided in one place,
+[`src/lib/gateway.js`](src/lib/gateway.js), by looking at the active key. A real
+`nvapi-…` key is sent from the browser as it always was; the trial sentinel is
+swapped for a route to [`netlify/functions/trial.mjs`](netlify/functions/trial.mjs),
+which holds the credential server-side. Nothing else in the app has to know
+which one is in play.
 
 **Stack:** React 19, Vite 8, and a vanilla CSS design system — no UI framework,
 no state library. Streaming uses the Fetch API's `ReadableStream` with a shared
@@ -107,23 +124,48 @@ npm run dev
 
 Other scripts: `npm run build`, `npm run preview`, `npm run lint`.
 
+`npm run dev` stands in for the trial function with a Vite proxy that attaches
+`NVIDIA_TRIAL_API_KEY` — enough to click the button, but it does not enforce the
+function's route allowlist, size caps, or rate limit. To exercise the real thing:
+
+```bash
+npx netlify dev
+```
+
 ---
 
 ## About API keys
 
-**A `VITE_NVIDIA_API_KEY` is not a secret.** Vite inlines every `VITE_*`
-variable into the client bundle at build time, so a key set that way is readable
-by anyone who loads the deployed site — including via Netlify's environment
-variables. Use it for local development only.
+There are two kinds of key here, and only one of them is a secret.
 
-For a public deployment, leave it unset and let each visitor supply their own
-key. Keys entered in the app are held in that browser's `localStorage` and sent
-only to NVIDIA. They are not encrypted — `localStorage` is readable by any
-script running on the same origin.
+**`VITE_NVIDIA_API_KEY` is not.** Vite inlines every `VITE_*` variable into the
+client bundle at build time, so a key set that way is readable by anyone who
+loads the deployed site — including via Netlify's environment variables. Use it
+for local development only. [`.env.production`](.env.production) blanks it so a
+production build cannot carry one by accident.
 
-If you need a genuinely server-side key, move the proxy into a Netlify Function
-that attaches the `Authorization` header, and stop sending the key from the
-client at all.
+**`NVIDIA_TRIAL_API_KEY` is.** No `VITE_` prefix, so it is never inlined; it is
+read by [`netlify/functions/trial.mjs`](netlify/functions/trial.mjs) at request
+time and attached server-side. Set it on the deployment, not in a committed file:
+
+```bash
+npx netlify env:set NVIDIA_TRIAL_API_KEY "nvapi-…"
+```
+
+Leave it unset and the trial button reports that the trial is switched off. The
+own-key path keeps working either way.
+
+**Running a trial means paying for strangers' inference.** The endpoint is open
+by design — that is the point of a trial — so the function bounds it: only
+`/models`, `/chat/completions` and `/embeddings` are reachable, replies are
+capped at 512 tokens, request bodies at 4 MB, and each IP gets 150 requests a
+minute and 700 an hour. Those counters live in the function instance's memory,
+so with several instances warm the real ceiling is higher. The dependable limit
+is the quota on the key itself — use one you are happy to watch and rotate.
+
+**Keys visitors paste** are held in that browser's `localStorage` and sent only
+to NVIDIA. They are not encrypted — `localStorage` is readable by any script
+running on the same origin.
 
 ---
 

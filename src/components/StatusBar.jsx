@@ -5,7 +5,7 @@
 
 import { Fragment, useMemo } from 'react'
 
-export function StatusBar({ models }) {
+export function StatusBar({ models, isTrial }) {
   const stats = useMemo(() => {
     const providers = new Set(models.map((m) => m.providerName))
     const categories = new Set(models.map((m) => m.category))
@@ -24,6 +24,10 @@ export function StatusBar({ models }) {
         <span className="status-dot status-dot-active" aria-hidden="true" />
         NIM connected
       </span>
+
+      {/* Worth saying plainly: on the trial, answers are capped and the quota
+          is shared, so a slow or refused request has a different cause here. */}
+      {isTrial && <span className="trial-pill">Shared trial key</span>}
 
       {stats.map((stat, i) => (
         <Fragment key={stat.label}>

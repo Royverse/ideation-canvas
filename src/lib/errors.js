@@ -9,6 +9,16 @@
  */
 const EXPLANATIONS = [
   {
+    test: /no trial key configured/i,
+    message: 'This deployment has no trial key set up. Connect your own NVIDIA key to continue.',
+  },
+  {
+    // Checked before the generic rate-limit rule below, because the fix is
+    // different: the trial is shared, so waiting may not be enough.
+    test: /shared trial key/i,
+    message: 'The shared trial key is busy right now. Wait a moment and try again, or connect your own NVIDIA key for full speed.',
+  },
+  {
     test: /not found for account|404/i,
     message: 'Your account does not have access to this model. Pick a different one from the model list — Llama, Gemma and Mistral are available on the free tier.',
   },
