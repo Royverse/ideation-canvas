@@ -11,6 +11,7 @@ import { useModelPicker } from '../../hooks/useModelPicker'
 import { useMediaQuery, usePrefersReducedMotion } from '../../hooks/useMediaQuery'
 import { ModelSelect } from '../shared/ModelSelect'
 import { MarkdownMessage } from '../shared/MarkdownMessage'
+import { useHealth } from '../../hooks/useHealthContext'
 import { explainError } from '../../lib/errors'
 import { PALETTE, CHANNELS, alpha } from '../../theme'
 
@@ -128,12 +129,19 @@ export function ReasoningEngine({ apiKey, models, selectedModelId, setSelectedMo
   const isMobile = useMediaQuery('(max-width: 767px)')
   const endRef = useRef(null)
 
+  const { partition } = useHealth()
+
   const reasoningModels = useMemo(
     () => models.filter((m) => m.category === 'reasoning'),
     [models],
   )
 
-  const { modelId, selectModel } = useModelPicker(reasoningModels, {
+  // Only offer models believed to work. Because the list is derived from
+  // live health, a model that starts failing drops out of it and the
+  // selection moves to the next healthy one without the user acting.
+  const { usable } = useMemo(() => partition(reasoningModels), [partition, reasoningModels])
+
+  const { modelId, selectModel } = useModelPicker(usable, {
     selectedModelId,
     setSelectedModelId,
     prefer: PREFERRED,

@@ -37,6 +37,36 @@ watch where they land.
 **Vision lab** — ask questions about an image, or sweep a probe across it to get
 a description of whatever region the pointer rests on.
 
+**Model status** — what your key can actually reach, checked continuously.
+
+---
+
+## Every model in the picker is one that works
+
+NVIDIA publishes one catalog to everyone. Your key can call part of it — on the
+account this was built against, 48 of 102. The `/v1/models` endpoint does not
+say which part, so a dropdown built straight from it is a list where roughly
+half the choices fail after you have already written your message.
+
+This app checks instead, using three signals:
+
+- **A free availability sweep on load.** The gateway resolves the model before
+  it validates the request body, so a deliberately invalid body returns `404`
+  when your key lacks the model and `400` when it has it. No inference runs, so
+  it costs **zero tokens** and sweeps the whole catalog in about 20 seconds.
+- **A liveness check when it matters** — opening a picker or choosing a model
+  confirms it is actually serving, and measures how fast.
+- **Every message you send**, reported back automatically. Free, and the most
+  authoritative signal there is.
+
+Each model shows a status dot and its measured response time, sorted fastest
+first. Models your key cannot call are collapsed behind a "show unavailable"
+toggle rather than hidden, because knowing what exists is useful too.
+
+Slow models are labelled, not hidden: several take ten seconds or more to wake
+up, and treating that as failure would hide working models — including, in
+testing, this app's own default.
+
 ---
 
 ## Architecture

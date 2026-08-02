@@ -8,6 +8,8 @@ import { CodeLab } from './components/code/CodeLab'
 import { ReasoningEngine } from './components/reasoning/ReasoningEngine'
 import { EmbeddingSearch } from './components/embeddings/EmbeddingSearch'
 import { VisionLab } from './components/vision/VisionLab'
+import { HealthView } from './components/health/HealthView'
+import { HealthProvider } from './components/health/HealthContext'
 
 import { useApiKey } from './hooks/useApiKey'
 import { useModels } from './hooks/useModels'
@@ -21,6 +23,7 @@ const VIEWS = {
   reasoning: ReasoningEngine,
   embeddings: EmbeddingSearch,
   vision: VisionLab,
+  health: HealthView,
 }
 
 function StoryView() {
@@ -245,7 +248,7 @@ function App() {
   const Workspace = VIEWS[currentView]
 
   return (
-    <>
+    <HealthProvider apiKey={apiKey} models={models}>
       <a href="#workspace" className="skip-link">Skip to workspace</a>
 
       <header className="mobile-header">
@@ -311,7 +314,7 @@ function App() {
           )}
         </main>
       </div>
-    </>
+    </HealthProvider>
   )
 }
 

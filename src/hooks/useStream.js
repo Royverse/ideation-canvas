@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { isAbortError } from '../api/nvidia'
+import { useHealth } from './useHealthContext'
 
 /**
  * Consumes an async token generator into conversation state.
@@ -31,6 +32,11 @@ export function useStream(streamFn, apiKey) {
   const [messages, setMessages] = useState([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState(null)
+
+  // Every real request is also a health check, and the most authoritative one
+  // available: it is the exact call the user cares about, and it costs nothing
+  // extra because it was going to happen anyway.
+  const { report } = useHealth()
 
   // `send` reads history at call time without listing `messages` as a
   // dependency, which would rebuild the callback on every token.
@@ -96,6 +102,9 @@ export function useStream(streamFn, apiKey) {
       })
     }
 
+    const startedAt = performance.now()
+    let sawFirstToken = false
+
     try {
       // Strip UI-only fields (`reasoning`, `isStreaming`) before sending.
       const payload = [...history, userMsg].map(({ role, content }) => ({ role, content }))
@@ -108,6 +117,13 @@ export function useStream(streamFn, apiKey) {
       })
 
       for await (const chunk of generator) {
+        // The first token is the moment the model is proven to be serving.
+        // Reporting here rather than at the end means a long generation still
+        // registers as healthy immediately.
+        if (!sawFirstToken) {
+          sawFirstToken = true
+          report(model, { ok: true, latencyMs: Math.round(performance.now() - startedAt) })
+        }
         if (typeof chunk === 'string') {
           appendToReply((msg) => { msg.content += chunk })
         } else if (chunk.type === 'thinking') {
@@ -116,15 +132,24 @@ export function useStream(streamFn, apiKey) {
           appendToReply((msg) => { msg.content += chunk.content })
         }
       }
+
+      // A stream that ends without ever yielding is not a success.
+      if (!sawFirstToken) {
+        report(model, { ok: false, error: new Error('The model returned nothing') })
+      }
     } catch (err) {
-      // A stop is a deliberate action, not a failure — keep what streamed in.
-      if (!isAbortError(err)) setError(err.message)
+      // A stop is a deliberate action, not a failure — keep what streamed in
+      // and do not hold it against the model's health.
+      if (!isAbortError(err)) {
+        setError(err.message)
+        report(model, { ok: false, error: err })
+      }
     } finally {
       if (abortRef.current === controller) abortRef.current = null
       setIsStreaming(false)
       appendToReply((msg) => { msg.isStreaming = false })
     }
-  }, [apiKey, streamFn, stop])
+  }, [apiKey, streamFn, stop, report])
 
   /** Clears the transcript, cancelling anything still streaming. */
   const clearMessages = useCallback(() => {

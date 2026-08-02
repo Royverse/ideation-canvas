@@ -16,12 +16,24 @@ import { fetchModels, isAbortError } from '../api/nvidia'
  * can actually show its chain of thought.
  *
  * @param {string} modelId - Fully-qualified model id, e.g. `meta/llama-3.1-8b-instruct`.
- * @returns {'embedding'|'reasoning'|'vision'|'code'|'chat'|'other'} Category key.
+ * @returns {'specialist'|'embedding'|'reasoning'|'vision'|'code'|'chat'|'other'} Category key.
  */
 function categoriseModel(modelId) {
   const id = modelId.toLowerCase()
 
   const matches = (...needles) => needles.some((n) => id.includes(n))
+
+  // Checked first, because these are chat-shaped without being chat. A safety
+  // classifier answers "safe"/"unsafe", a reward model returns a score, a
+  // parser wants a document rather than a sentence. They pass every
+  // availability check and then disappoint, which is exactly the experience
+  // this categorisation exists to prevent.
+  if (matches(
+    'guard', 'safety', 'topic-control', 'content-safety', 'jailbreak',
+    'reward', 'parse', 'translate', 'ocr', 'detector', 'moderation',
+  )) {
+    return 'specialist'
+  }
 
   if (matches('embed', 'retrieval', 'rerank')) return 'embedding'
 
@@ -89,8 +101,12 @@ function decorate(model) {
   }
 }
 
-/** Cache key for a given account. Keeps one catalog per key, not one global. */
-const cacheKeyFor = (apiKey) => `nim_models_cache_${apiKey.slice(0, 10)}`
+/**
+ * Cache key for a given account. Keeps one catalog per key, not one global.
+ * The version suffix is bumped whenever `decorate` changes shape, so a cached
+ * catalog is never read back under a newer set of rules.
+ */
+const cacheKeyFor = (apiKey) => `nim_models_v2_${apiKey.slice(0, 10)}`
 
 /**
  * Reads a previously cached catalog, if there is one.

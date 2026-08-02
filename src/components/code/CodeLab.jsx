@@ -17,6 +17,7 @@ import { MarkdownMessage } from '../shared/MarkdownMessage'
 import { StreamTelemetry } from '../shared/StreamTelemetry'
 import { copyText } from '../../lib/clipboard'
 import { getProvider } from '../../lib/providers'
+import { useHealth } from '../../hooks/useHealthContext'
 import { explainError } from '../../lib/errors'
 import { PALETTE } from '../../theme'
 
@@ -87,12 +88,19 @@ export function CodeLab({ apiKey, models, selectedModelId, setSelectedModelId })
 
   // Code models are scarce on some account tiers, so general chat models are
   // offered too — most of them write serviceable code.
+  const { partition } = useHealth()
+
   const codeModels = useMemo(
     () => models.filter((m) => m.category === 'code' || m.category === 'chat'),
     [models],
   )
 
-  const { modelId, selectModel } = useModelPicker(codeModels, {
+  // Only offer models believed to work. Because the list is derived from
+  // live health, a model that starts failing drops out of it and the
+  // selection moves to the next healthy one without the user acting.
+  const { usable } = useMemo(() => partition(codeModels), [partition, codeModels])
+
+  const { modelId, selectModel } = useModelPicker(usable, {
     selectedModelId,
     setSelectedModelId,
     prefer: PREFERRED,

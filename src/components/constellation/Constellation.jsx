@@ -20,6 +20,7 @@ const CLUSTERS = {
   code: { name: 'Code', x: 0.75, y: 0.28, view: 'code', workspace: 'Code lab' },
   vision: { name: 'Vision', x: 0.22, y: 0.70, view: 'vision', workspace: 'Vision lab' },
   embedding: { name: 'Embedding', x: 0.72, y: 0.65, view: 'embeddings', workspace: 'Embedding search' },
+  specialist: { name: 'Specialist', x: 0.44, y: 0.80, view: 'health', workspace: 'Model status' },
   other: { name: 'Other', x: 0.50, y: 0.55, view: 'arena', workspace: 'Chat arena' },
 }
 

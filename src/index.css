@@ -1453,6 +1453,403 @@ input[type=range]::-webkit-slider-thumb:hover {
   transition: width 0.4s ease-out;
 }
 
+/* Live count of usable models, shown on the status nav item. */
+.nav-badge {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--nebula-glow);
+  background: rgba(var(--nebula-core-rgb), 0.14);
+  border: 1px solid rgba(var(--nebula-core-rgb), 0.22);
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+
+/* ─── HEALTH VIEW ────────────────────────────────────────────────────────── */
+.health-view {
+  position: relative;
+  height: 100%;
+  overflow-y: auto;
+  background: var(--bg-void);
+}
+.health-view-inner {
+  position: relative;
+  z-index: 1;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 24px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.health-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.health-title {
+  font-family: 'Inter', sans-serif;
+  font-size: 24px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.health-lede {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  max-width: 620px;
+}
+
+.health-sweep {
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: rgba(var(--nebula-core-rgb), 0.06);
+  border: 1px solid rgba(var(--nebula-core-rgb), 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.health-sweep-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.health-sweep-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.health-sweep-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.health-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.health-tile {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.health-tile:hover { transform: none; }
+.health-tile-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--nebula-glow);
+  line-height: 1.1;
+}
+.health-tile-label {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.health-tile-hint {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.health-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.chip-active {
+  border-color: var(--border-active);
+  color: var(--nebula-glow);
+  background: rgba(var(--nebula-core-rgb), 0.12);
+}
+
+.health-table {
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.health-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 2.2fr) 100px 130px 78px 88px 62px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-dim);
+  font-size: 12px;
+}
+.health-row:last-child { border-bottom: none; }
+.health-row:not(.health-row-head):hover { background: rgba(255, 255, 255, 0.015); }
+.health-row-head {
+  background: rgba(var(--bg-panel-rgb), 0.6);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.health-cell-model {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.health-cell-owner {
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.health-cat {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+.health-cell-latency,
+.health-cell-age {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+.health-test { padding: 3px 9px; font-size: 9px; }
+.health-empty {
+  padding: 28px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.health-footnote {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(var(--bg-panel-rgb), 0.4);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+.health-footnote strong { color: var(--text-primary); font-weight: 600; }
+.health-footnote code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--nebula-glow);
+  background: rgba(var(--nebula-core-rgb), 0.1);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+@media (max-width: 767px) {
+  /* The table cannot compress to a phone; scroll it rather than crush it. */
+  .health-table { overflow-x: auto; }
+  .health-row { grid-template-columns: minmax(150px, 2fr) 90px 120px 70px 80px 60px; min-width: 640px; }
+}
+
+/* ─── HEALTH INDICATOR ───────────────────────────────────────────────────── */
+/*
+ * Shape carries the state as well as colour — solid means confirmed working,
+ * a ring means probably, a cross means no. Colour alone would fail anyone who
+ * cannot separate the hues.
+ */
+.health-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  position: relative;
+}
+.health-dot-good { background: var(--accent-mint); }
+.health-dot-warn { background: var(--accent-pending); }
+.health-dot-bad { background: var(--accent-coral); }
+.health-dot-muted { background: var(--text-dim); }
+
+.health-dot-solid { box-shadow: 0 0 6px currentColor; }
+.health-dot-ring {
+  background: transparent;
+  border: 1.5px solid;
+}
+.health-dot-ring.health-dot-good { border-color: var(--accent-mint); }
+.health-dot-ring.health-dot-warn { border-color: var(--accent-pending); }
+.health-dot-ring.health-dot-bad { border-color: var(--accent-coral); }
+.health-dot-hollow {
+  background: transparent;
+  border: 1.5px dashed var(--text-dim);
+}
+.health-dot-cross { opacity: 0.55; }
+.health-dot-cross::after {
+  content: '';
+  position: absolute;
+  inset: 50% -2px auto -2px;
+  height: 1.5px;
+  background: var(--bg-void);
+  transform: rotate(-45deg);
+}
+.health-dot-pulse { animation: pulse-dot 1.2s ease-in-out infinite; }
+
+.health-dot-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ─── MODEL PICKER ───────────────────────────────────────────────────────── */
+.model-select {
+  position: relative;
+  flex-shrink: 1;
+  min-width: 0;
+}
+.model-select-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 200px;
+  max-width: 300px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(var(--bg-void-rgb), 0.5);
+  border: 1px solid var(--border-base);
+  color: var(--nebula-glow);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.model-select-trigger:hover:not(:disabled) { border-color: var(--border-active); }
+.model-select-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+.model-select-name {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-select-caret { color: var(--text-dim); font-size: 9px; }
+
+/*
+ * Portalled to the body, so `position: fixed` with coordinates measured from
+ * the trigger. Fully opaque and without a backdrop filter: a list of names has
+ * to be readable, and translucency over a busy canvas is not.
+ */
+.model-menu {
+  position: fixed;
+  z-index: 1500;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  border-radius: 12px;
+  background: #0c0c22;
+  border: 1px solid var(--border-active);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.7);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.model-menu-empty {
+  padding: 20px 14px;
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.model-menu-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.model-menu-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: var(--nebula-glow);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.model-menu-toggle:hover { background: rgba(var(--nebula-core-rgb), 0.12); }
+
+.model-menu-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  flex: 1;
+}
+.model-menu-divider {
+  padding: 10px 10px 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 4px;
+}
+
+.model-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  text-align: left;
+  transition: background-color 0.12s;
+}
+.model-option:hover:not(:disabled) { background: rgba(var(--nebula-core-rgb), 0.14); }
+.model-option.selected { background: rgba(var(--nebula-core-rgb), 0.2); color: var(--nebula-glow); }
+.model-option.unusable { opacity: 0.45; cursor: not-allowed; }
+.model-option-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-option-meta {
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ─── TOGGLE SWITCH ──────────────────────────────────────────────────────── */
 .toggle {
   width: 32px;

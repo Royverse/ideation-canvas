@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from 'react'
 import { API_CALL_EVENT } from '../api/nvidia'
+import { useHealth } from '../hooks/useHealthContext'
 
 /**
  * The six workspaces, in the order someone new should meet them: see the whole
@@ -17,6 +18,7 @@ const VIEWS = [
   { id: 'reasoning', label: 'Reasoning' },
   { id: 'embeddings', label: 'Embeddings' },
   { id: 'vision', label: 'Vision lab' },
+  { id: 'health', label: 'Model status' },
 ]
 
 /**
@@ -44,6 +46,7 @@ function useApiCallCount() {
 
 export function Sidebar({ currentView, setView, mobileOpen, setMobileOpen, onSignOut }) {
   const apiCalls = useApiCallCount()
+  const { summary, sweep } = useHealth()
 
   const go = (id) => {
     setView(id)
@@ -74,6 +77,14 @@ export function Sidebar({ currentView, setView, mobileOpen, setMobileOpen, onSig
             onClick={() => go(view.id)}
           >
             {view.label}
+            {/* The count belongs on this item specifically: it is the answer
+                the status view exists to give, so showing it here often makes
+                opening the view unnecessary. */}
+            {view.id === 'health' && summary.total > 0 && (
+              <span className="nav-badge">
+                {sweep.running ? `${sweep.done}/${sweep.total}` : `${summary.usable}/${summary.total}`}
+              </span>
+            )}
           </button>
         ))}
       </div>

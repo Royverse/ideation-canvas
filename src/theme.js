@@ -58,6 +58,7 @@ export const CATEGORY_COLORS = {
   reasoning: '#a78bfa', // nebula glow
   vision: '#60a5fa',    // star blue
   embedding: '#fbbf24', // solar amber
+  specialist: '#8b5cf6', // deep nebula — classifiers, parsers, rerankers
   other: '#4b4a6a',     // dim slate
 }
 

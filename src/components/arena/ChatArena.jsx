@@ -14,6 +14,7 @@ import { useStreamTelemetry } from '../../hooks/useStreamTelemetry'
 import { MarkdownMessage } from '../shared/MarkdownMessage'
 import { StreamTelemetry } from '../shared/StreamTelemetry'
 import { copyText } from '../../lib/clipboard'
+import { useHealth } from '../../hooks/useHealthContext'
 import { getProvider } from '../../lib/providers'
 import { explainError } from '../../lib/errors'
 import { PALETTE } from '../../theme'
@@ -48,9 +49,15 @@ export function ChatArena({ apiKey, models, selectedModelId, setSelectedModelId 
   const mode = isMobile ? 'mobile' : 'desktop'
   const railSize = rail.mode === mode ? rail.size : (isMobile ? 180 : 240)
 
+  const { partition } = useHealth()
   const chatModels = useMemo(() => models.filter((m) => m.category === 'chat'), [models])
 
-  const { modelId, selectModel } = useModelPicker(chatModels, {
+  // The picker only ever chooses from models believed to work. Because that
+  // list is derived from live health, a model that starts failing drops out of
+  // it and the selection moves to the next healthy one on its own.
+  const { usable } = useMemo(() => partition(chatModels), [partition, chatModels])
+
+  const { modelId, selectModel } = useModelPicker(usable, {
     selectedModelId,
     setSelectedModelId,
     prefer: PREFERRED,

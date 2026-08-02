@@ -10,6 +10,7 @@ import { embedText, isAbortError } from '../../api/nvidia'
 import { useModelPicker } from '../../hooks/useModelPicker'
 import { useMediaQuery, usePrefersReducedMotion } from '../../hooks/useMediaQuery'
 import { ModelSelect } from '../shared/ModelSelect'
+import { useHealth } from '../../hooks/useHealthContext'
 import { explainError } from '../../lib/errors'
 import { PALETTE, CHANNELS, alpha, SIMILARITY_SCALE, similarityColor } from '../../theme'
 
@@ -89,12 +90,19 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
   const hasSearchedRef = useRef(false)
   const abortRef = useRef(null)
 
+  const { partition, report } = useHealth()
+
   const embedModels = useMemo(
     () => models.filter((m) => m.category === 'embedding'),
     [models],
   )
 
-  const { modelId, selectModel } = useModelPicker(embedModels, {
+  // Only offer models believed to work. Because the list is derived from
+  // live health, a model that starts failing drops out of it and the
+  // selection moves to the next healthy one without the user acting.
+  const { usable } = useMemo(() => partition(embedModels), [partition, embedModels])
+
+  const { modelId, selectModel } = useModelPicker(usable, {
     selectedModelId,
     setSelectedModelId,
     prefer: PREFERRED,
@@ -129,6 +137,7 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
       signal: controller.signal,
     })
       .then((vectors) => {
+        report(modelId, { ok: true })
         // Match vectors back to documents by id — the corpus can grow while a
         // request is in flight, so position is not a reliable pairing.
         const byId = new Map(ids.map((id, i) => [id, vectors[i]]))
@@ -139,11 +148,14 @@ export function EmbeddingSearch({ apiKey, models, selectedModelId, setSelectedMo
         )))
       })
       .catch((err) => {
-        if (!isAbortError(err)) setError(explainError(err.message))
+        if (!isAbortError(err)) {
+          setError(explainError(err.message))
+          report(modelId, { ok: false, error: err })
+        }
       })
 
     return () => controller.abort()
-  }, [apiKey, modelId, pending])
+  }, [apiKey, modelId, pending, report])
 
   // Give every document a position, keeping any it already had so adding a new
   // document does not teleport the rest of the map.

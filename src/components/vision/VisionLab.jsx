@@ -10,6 +10,7 @@ import { useModelPicker } from '../../hooks/useModelPicker'
 import { usePrefersReducedMotion } from '../../hooks/useMediaQuery'
 import { ModelSelect } from '../shared/ModelSelect'
 import { MarkdownMessage } from '../shared/MarkdownMessage'
+import { useHealth } from '../../hooks/useHealthContext'
 import { explainError } from '../../lib/errors'
 import { PALETTE, CHANNELS, alpha } from '../../theme'
 
@@ -60,12 +61,19 @@ export function VisionLab({ apiKey, models, selectedModelId, setSelectedModelId 
 
   const reducedMotion = usePrefersReducedMotion()
 
+  const { partition, report } = useHealth()
+
   const visionModels = useMemo(
     () => models.filter((m) => m.category === 'vision'),
     [models],
   )
 
-  const { modelId, selectModel } = useModelPicker(visionModels, {
+  // Only offer models believed to work. Because the list is derived from
+  // live health, a model that starts failing drops out of it and the
+  // selection moves to the next healthy one without the user acting.
+  const { usable } = useMemo(() => partition(visionModels), [partition, visionModels])
+
+  const { modelId, selectModel } = useModelPicker(usable, {
     selectedModelId,
     setSelectedModelId,
     prefer: PREFERRED,
@@ -268,6 +276,9 @@ export function VisionLab({ apiKey, models, selectedModelId, setSelectedModelId 
     setError(null)
     setIsStreaming(true)
 
+    const startedAt = performance.now()
+    let answered = false
+
     try {
       const stream = streamVisionChat(apiKey, {
         model: modelId,
@@ -277,14 +288,25 @@ export function VisionLab({ apiKey, models, selectedModelId, setSelectedModelId 
         max_tokens: 1024,
         signal: controller.signal,
       })
-      for await (const token of stream) setResponse((prev) => prev + token)
+      for await (const token of stream) {
+        // The first token proves the model is serving; feed that back so the
+        // pickers reflect it without spending a separate probe.
+        if (!answered) {
+          answered = true
+          report(modelId, { ok: true, latencyMs: Math.round(performance.now() - startedAt) })
+        }
+        setResponse((prev) => prev + token)
+      }
     } catch (err) {
-      if (!isAbortError(err)) setError(explainError(err.message))
+      if (!isAbortError(err)) {
+        setError(explainError(err.message))
+        report(modelId, { ok: false, error: err })
+      }
     } finally {
       if (askAbortRef.current === controller) askAbortRef.current = null
       setIsStreaming(false)
     }
-  }, [apiKey, modelId, isStreaming, image])
+  }, [apiKey, modelId, isStreaming, image, report])
 
   const handleSend = () => {
     const prompt = input

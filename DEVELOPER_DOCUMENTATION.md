@@ -17,6 +17,7 @@ Welcome to the **milkyway.ai** comprehensive developer documentation. This guide
 5. [State Management & Global Hooks](#5-state-management--global-hooks)
 6. [Mobile Design System & CSS Variables](#6-mobile-design-system--css-variables)
 7. [Local Setup & Deployment Instructions](#7-local-setup--deployment-instructions)
+8. [Model Availability & Health](#8-model-availability--health)
 
 ---
 
@@ -350,3 +351,81 @@ Compile the minified assets bundle:
 npm run build
 ```
 This produces optimized production assets inside the `/dist` directory. Netlify picks up this folder automatically on deploy.
+
+---
+
+## 8. Model Availability & Health
+
+### The problem
+
+`GET /v1/models` returns the catalog NVIDIA publishes to everyone. Each entry
+carries `id`, `object`, `created` and `owned_by` — nothing about whether *your*
+key may call it. On the account this was built against, **54 of 102 listed
+models answer a real request with `404 Not found for account`**. Rendering that
+list straight into a dropdown is why choosing a model used to feel like a
+gamble.
+
+### The zero-token availability probe
+
+The gateway resolves the model *before* it validates the request body. That
+ordering is the whole trick: send a body that is guaranteed to fail validation,
+and the status code tells you which stage rejected it.
+
+```js
+POST /v1/chat/completions  { model, messages: [], max_tokens: 1 }
+
+400  "The 'messages' field cannot be empty"   -> the model resolved; you have it
+404  "Function '…': Not found for account"    -> you never had it
+```
+
+No inference runs, so **no tokens are spent**, and the whole catalog sweeps in
+about 20 seconds at a concurrency of five. Three other invalid-body variants
+were tried and rejected as unreliable: `max_tokens: 0` made one model run
+inference anyway, and both a bad `temperature` and a missing `messages` key
+produced false `404`s on a model that was actually entitled.
+
+### Why availability alone is not enough
+
+Measured against real inference calls:
+
+| Verdict | Accuracy | Conclusion |
+| --- | --- | --- |
+| `404` → blocked | 6/6 correct | Reliable. Nothing entitled is ever hidden. |
+| `400` → available | 10/14 worked | Entitled is not the same as serving. |
+| timeout | 2/6 later worked | **A timeout is a cold start, not a failure.** |
+
+That last row matters most. The app's own default chat model timed out on the
+probe and then answered fine in 11 seconds. Anything that treats a timeout as
+"down" hides working models — so timeouts are recorded as `cold` and retried
+with a longer budget, never written off.
+
+### Three signals, in increasing order of authority
+
+1. **Entitlement sweep** — free, whole-catalog, on load. Cached for 24 hours,
+   because entitlement is a property of the account rather than the moment.
+2. **Liveness probe** — a real one-token call, run when a picker opens or a
+   model is chosen. Costs a few tokens; cached for minutes, not hours.
+3. **Real traffic** — every message the user sends reports back. Free,
+   authoritative, and continuous. This is what makes the system self-correcting:
+   a model that starts failing is marked within one request, and one that
+   recovers is cleared the instant it answers.
+
+Repeated failures back off exponentially (30s, doubling, capped at 15 minutes)
+so a broken model is not polled forever, and any success resets the counter.
+
+### Self-healing in practice
+
+The workspaces feed only *usable* models into `useModelPicker`. Because that
+list is derived from live health rather than stored, a model that starts failing
+drops out of it and the selection moves to the next healthy one with no reset
+logic anywhere. Verified by planting a false healthy verdict on a model known to
+return `404`: it was offered, corrected on selection by the liveness probe,
+removed from the list, and the selection moved on — before any message could be
+sent.
+
+### Specialist models
+
+Safety classifiers, reward models, document parsers and translators are
+chat-shaped without being chat: they pass every availability check and then
+return a verdict or a score instead of a reply. They are categorised as
+`specialist` so they never appear in the chat picker.
