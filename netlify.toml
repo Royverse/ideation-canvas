@@ -1,17 +1,19 @@
-# example netlify.toml
 [build]
   command = "npm run build"
-  functions = "netlify/functions"
   publish = "dist"
 
-# Proxy NVIDIA API requests to bypass CORS
+# The NIM gateway sends no CORS headers, so the browser cannot call it directly.
+# This rewrite makes every /api/nvidia/* request same-origin; Netlify forwards
+# it server-side with the Authorization header intact.
+# The local equivalent is the `server.proxy` block in vite.config.js — keep the
+# two targets in step.
 [[redirects]]
   from = "/api/nvidia/*"
   to = "https://integrate.api.nvidia.com/v1/:splat"
   status = 200
   force = true
 
-# Fallback for SPA routing
+# Single-page app: every other path is served by the client router.
 [[redirects]]
   from = "/*"
   to = "/index.html"
