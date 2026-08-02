@@ -1,126 +1,210 @@
-import React, { useEffect, useRef, useState } from 'react'
+/**
+ * @file Constellation.jsx
+ * @description The landing map. Every model the account can reach is a star,
+ * clustered into nebulae by what it does. Pan, zoom, and fly into one to open
+ * the workspace that model belongs to.
+ *
+ * This is the app's signature view, so it carries the motion budget: parallax
+ * starfield, drifting clusters, energy travelling between related models. Every
+ * other screen stays deliberately still.
+ */
 
-const CATS_CONFIG = {
-  'chat': { name: 'CHAT', x: 0.28, y: 0.38, color: '#5ab87a' },
-  'embedding': { name: 'EMBEDDING', x: 0.72, y: 0.65, color: '#f5a93d' },
-  'reasoning': { name: 'REASONING', x: 0.55, y: 0.22, color: '#8b6fd4' },
-  'vision': { name: 'VISION', x: 0.22, y: 0.70, color: '#4fa3d4' },
-  'code': { name: 'CODE', x: 0.75, y: 0.28, color: '#d46060' },
-  'other': { name: 'OTHER', x: 0.50, y: 0.55, color: '#4a4236' }
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { usePrefersReducedMotion, useMediaQuery } from '../../hooks/useMediaQuery'
+import { CATEGORY_COLORS } from '../../theme'
+
+/** Cluster centres as a fraction of the canvas, plus the workspace each opens. */
+const CLUSTERS = {
+  chat: { name: 'Chat', x: 0.28, y: 0.38, view: 'arena', workspace: 'Chat arena' },
+  reasoning: { name: 'Reasoning', x: 0.55, y: 0.22, view: 'reasoning', workspace: 'Reasoning' },
+  code: { name: 'Code', x: 0.75, y: 0.28, view: 'code', workspace: 'Code lab' },
+  vision: { name: 'Vision', x: 0.22, y: 0.70, view: 'vision', workspace: 'Vision lab' },
+  embedding: { name: 'Embedding', x: 0.72, y: 0.65, view: 'embeddings', workspace: 'Embedding search' },
+  specialist: { name: 'Specialist', x: 0.44, y: 0.80, view: 'health', workspace: 'Model status' },
+  other: { name: 'Other', x: 0.50, y: 0.55, view: 'arena', workspace: 'Chat arena' },
+}
+
+const ZOOM_MIN = 0.35
+const ZOOM_MAX = 4.5
+const ZOOM_STEP = 1.15
+
+/** How long the fly-in runs before the workspace opens, in ms. */
+const WARP_MS = 700
+const FADE_MS = 450
+
+/**
+ * Deterministic pseudo-random in [0, 1), so the map lays out identically on
+ * every load — a star that moves between refreshes is not a landmark.
+ * @param {number} i - Seed index.
+ * @returns {number} Stable value in [0, 1).
+ */
+function seeded(i) {
+  const x = Math.sin(i * 127.1) * 43758.5453
+  return x - Math.floor(x)
+}
+
+/**
+ * A one-line description of what a model is for, shown on the inspector card.
+ * @param {{id: string, category: string}} model - Decorated model record.
+ * @returns {string} Plain-language capability summary.
+ */
+function describeModel(model) {
+  const id = model.id.toLowerCase()
+  if (id.includes('405b') || id.includes('671b')) return 'Frontier-scale model for hard reasoning and synthetic data.'
+  if (model.category === 'reasoning') return 'Works through a problem step by step before answering.'
+  if (model.category === 'vision') return 'Reads images: description, OCR, and visual question answering.'
+  if (model.category === 'embedding') return 'Turns text into vectors for semantic search and retrieval.'
+  if (model.category === 'code') return 'Tuned for writing and explaining code.'
+  if (id.includes('nemotron')) return "NVIDIA's own tuning of a general-purpose assistant."
+  return 'General-purpose conversation and instruction following.'
 }
 
 export function Constellation({ models, setView, selectedModelId, setSelectedModelId }) {
-  const canvasRef = useRef(null)
   const wrapperRef = useRef(null)
-  const starsRef = useRef([])
-  const particlesRef = useRef([])
-  const mouseScreenPosRef = useRef({ x: 0, y: 0 })
-  const mouseWorldPosRef = useRef({ x: 0, y: 0 })
-  const isDraggingRef = useRef(false)
-  const dragStartRef = useRef({ x: 0, y: 0 })
-  const cameraStartRef = useRef({ x: 0, y: 0 })
-  const isTransitioningRef = useRef(false)
-  const [fadeOut, setFadeOut] = useState(false)
-  const [hoveredNode, setHoveredNode] = useState(null)
-  const hoveredNodeRef = useRef(null)
-  const [showHelp, setShowHelp] = useState(window.innerWidth >= 768)
-  
-  // Camera state in a ref for frame-by-frame updates without React lagging
-  const cameraRef = useRef({
-    x: 0,
-    y: 0,
-    zoom: 0.8,
-    targetX: 0,
-    targetY: 0,
-    targetZoom: 0.95
-  })
-  
-  const nodesRef = useRef([])
+  const canvasRef = useRef(null)
 
+  const starsRef = useRef([])
+  const nodesRef = useRef([])
+  const particlesRef = useRef([])
+  const sizeRef = useRef({ width: 0, height: 0 })
+
+  const cameraRef = useRef({ x: 0, y: 0, zoom: 0.8, targetX: 0, targetY: 0, targetZoom: 0.95 })
+  const dragRef = useRef({ active: false, pointerX: 0, pointerY: 0, cameraX: 0, cameraY: 0, moved: false })
+  const hoveredRef = useRef(null)
+  const warpingRef = useRef(false)
+  const timersRef = useRef([])
+  // What was already selected when the gesture started. On touch there is no
+  // hover, so the first tap inspects and only a second tap opens.
+  const hoverAtPressRef = useRef(null)
+
+  const [hovered, setHovered] = useState(null)
+  const [zoom, setZoom] = useState(0.95)
+  const [isPanning, setIsPanning] = useState(false)
+  const [fadeOut, setFadeOut] = useState(false)
+
+  const isMobile = useMediaQuery('(max-width: 767px)')
+  const reducedMotion = usePrefersReducedMotion()
+  const [showHelp, setShowHelp] = useState(!isMobile)
+
+  /** Converts a pointer event into world coordinates on the map. */
+  const toWorld = useCallback((clientX, clientY) => {
+    const rect = canvasRef.current?.getBoundingClientRect()
+    if (!rect) return null
+    const camera = cameraRef.current
+    return {
+      screenX: clientX - rect.left,
+      screenY: clientY - rect.top,
+      worldX: camera.x + (clientX - rect.left - rect.width / 2) / camera.zoom,
+      worldY: camera.y + (clientY - rect.top - rect.height / 2) / camera.zoom,
+      rect,
+    }
+  }, [])
+
+  // ── Render loop ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!models || models.length === 0) return
-
     const canvas = canvasRef.current
     const wrapper = wrapperRef.current
     if (!canvas || !wrapper) return
-
-    const dpr = window.devicePixelRatio || 1
-    const W = wrapper.offsetWidth
-    const H = wrapper.offsetHeight
-    canvas.width = W * dpr
-    canvas.height = H * dpr
     const ctx = canvas.getContext('2d')
-    ctx.scale(dpr, dpr)
 
-    const seed = (i) => (Math.sin(i * 127.1) * 43758.5453) % 1
+    /**
+     * Resizes the backing store to match the element and the device pixel
+     * ratio. Without this the map stretches the moment the window changes size.
+     */
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1
+      const width = wrapper.offsetWidth
+      const height = wrapper.offsetHeight
+      canvas.width = Math.max(1, Math.floor(width * dpr))
+      canvas.height = Math.max(1, Math.floor(height * dpr))
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-    // Initialize camera targets to center of screen
-    if (cameraRef.current.x === 0) {
-      cameraRef.current.x = W / 2
-      cameraRef.current.y = H / 2
-      cameraRef.current.targetX = W / 2
-      cameraRef.current.targetY = H / 2
-    }
+      const previous = sizeRef.current
+      sizeRef.current = { width, height }
 
-    // Initialize starfield with depth for 3D parallax
-    if (starsRef.current.length === 0) {
-      const stars = []
-      for (let i = 0; i < 220; i++) {
-        stars.push({
-          x: Math.random(),
-          y: Math.random(),
-          size: Math.random() * 1.6 + 0.4,
-          alpha: 0.15 + Math.random() * 0.6,
-          depth: Math.random() * 0.75 + 0.15 // parallax speed layer
-        })
-      }
-      starsRef.current = stars
-    }
-
-    // Build nodes from models if not already built
-    if (nodesRef.current.length === 0) {
-      const newNodes = models.map((m, idx) => {
-        const catKey = m.category || 'other'
-        const cat = CATS_CONFIG[catKey]
-        const angle = seed(idx) * Math.PI * 2
-        const r = 35 + seed(idx + 100) * 80
-        
-        let radius = 5
-        if (m.contextWindow === '128K') radius = 9
-        else if (m.contextWindow === '32K') radius = 7
-        else if (m.contextWindow === '8K') radius = 5.5
-
-        return {
-          model: m,
-          x: cat.x * W + Math.cos(angle) * r,
-          y: cat.y * H + Math.sin(angle) * r,
-          vx: (seed(idx + 200) - 0.5) * 0.18,
-          vy: (seed(idx + 300) - 0.5) * 0.18,
-          radius: radius,
-          color: cat.color,
-          catConfig: cat,
-          phase: seed(idx + 500) * Math.PI * 2,
-          trail: []
+      // Keep every node at the same relative spot across a resize.
+      if (previous.width > 0 && previous.height > 0) {
+        const scaleX = width / previous.width
+        const scaleY = height / previous.height
+        for (const node of nodesRef.current) {
+          node.x *= scaleX
+          node.y *= scaleY
         }
-      })
-      nodesRef.current = newNodes
+        const camera = cameraRef.current
+        camera.x *= scaleX; camera.targetX *= scaleX
+        camera.y *= scaleY; camera.targetY *= scaleY
+      } else {
+        cameraRef.current.x = width / 2
+        cameraRef.current.y = height / 2
+        cameraRef.current.targetX = width / 2
+        cameraRef.current.targetY = height / 2
+      }
+    }
+    resize()
+
+    const observer = new ResizeObserver(resize)
+    observer.observe(wrapper)
+
+    const { width: W0, height: H0 } = sizeRef.current
+
+    if (starsRef.current.length === 0) {
+      starsRef.current = Array.from({ length: 220 }, () => ({
+        x: Math.random(),
+        y: Math.random(),
+        size: Math.random() * 1.6 + 0.4,
+        alpha: 0.15 + Math.random() * 0.6,
+        depth: Math.random() * 0.75 + 0.15, // Parallax layer: nearer stars move more.
+      }))
     }
 
+    // Rebuild whenever the model list changes identity, so a refreshed registry
+    // is reflected rather than showing a stale sky.
+    nodesRef.current = models.map((model, index) => {
+      const key = CLUSTERS[model.category] ? model.category : 'other'
+      const cluster = CLUSTERS[key]
+      const angle = seeded(index) * Math.PI * 2
+      const spread = 35 + seeded(index + 100) * 80
+      const existing = nodesRef.current.find((n) => n.model.id === model.id)
+
+      const radius = model.contextWindow === '128K' ? 9
+        : model.contextWindow === '32K' ? 7
+        : model.contextWindow === '16K' ? 6 : 5.5
+
+      return {
+        model,
+        clusterKey: key,
+        cluster,
+        color: CATEGORY_COLORS[key],
+        x: existing?.x ?? cluster.x * W0 + Math.cos(angle) * spread,
+        y: existing?.y ?? cluster.y * H0 + Math.sin(angle) * spread,
+        vx: existing?.vx ?? (seeded(index + 200) - 0.5) * 0.18,
+        vy: existing?.vy ?? (seeded(index + 300) - 0.5) * 0.18,
+        radius,
+        phase: seeded(index + 500) * Math.PI * 2,
+        trail: [],
+      }
+    })
+
+    let frame
     let t = 0
-    let animFrame
 
-    function draw() {
-      ctx.clearRect(0, 0, W, H)
-      t += 0.01
-
-      // 1. Camera Lerp transition
+    const draw = () => {
+      const { width: W, height: H } = sizeRef.current
       const camera = cameraRef.current
-      const lerpFactor = 0.08
-      camera.x += (camera.targetX - camera.x) * lerpFactor
-      camera.y += (camera.targetY - camera.y) * lerpFactor
-      camera.zoom += (camera.targetZoom - camera.zoom) * lerpFactor
+      const nodes = nodesRef.current
+      const hoveredNode = hoveredRef.current
 
-      // 2. Draw parallax starfield (in screen space)
+      ctx.clearRect(0, 0, W, H)
+      if (!reducedMotion) t += 0.01
+
+      // Ease the camera toward its target so pans and zooms feel weighted.
+      const ease = reducedMotion ? 1 : 0.08
+      camera.x += (camera.targetX - camera.x) * ease
+      camera.y += (camera.targetY - camera.y) * ease
+      camera.zoom += (camera.targetZoom - camera.zoom) * ease
+
+      // Starfield, drawn in screen space and offset by depth for parallax.
       for (const star of starsRef.current) {
         let sx = (star.x * W - camera.x * star.depth) % W
         let sy = (star.y * H - camera.y * star.depth) % H
@@ -130,198 +214,157 @@ export function Constellation({ models, setView, selectedModelId, setSelectedMod
         ctx.fillRect(sx, sy, star.size, star.size)
       }
 
-      // Save normal context for transform space
       ctx.save()
-      
-      // Perform Camera Transformations
       ctx.translate(W / 2, H / 2)
       ctx.scale(camera.zoom, camera.zoom)
       ctx.translate(-camera.x, -camera.y)
 
-      const nodes = nodesRef.current
-
-      // 3. Draw Nebulas
-      for (const catKey of Object.keys(CATS_CONFIG)) {
-        const cat = CATS_CONFIG[catKey]
-        const cx = cat.x * W
-        const cy = cat.y * H
-        const modelCount = nodes.filter(n => n.model.category === catKey).length
-        if (modelCount === 0) continue
-
-        const nebulaRadius = 90 + modelCount * 9
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, nebulaRadius)
-        grad.addColorStop(0, cat.color + '18') // ~9% opacity
-        grad.addColorStop(0.5, cat.color + '04') // ~1.5% opacity
-        grad.addColorStop(1, 'rgba(0,0,0,0)')
-
+      // Nebulae: a soft wash sized by how many models live in each cluster.
+      for (const [key, cluster] of Object.entries(CLUSTERS)) {
+        const count = nodes.filter((n) => n.clusterKey === key).length
+        if (count === 0) continue
+        const cx = cluster.x * W
+        const cy = cluster.y * H
+        const radius = 90 + count * 9
+        const wash = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
+        wash.addColorStop(0, `${CATEGORY_COLORS[key]}18`)
+        wash.addColorStop(0.5, `${CATEGORY_COLORS[key]}04`)
+        wash.addColorStop(1, 'rgba(0, 0, 0, 0)')
+        ctx.fillStyle = wash
         ctx.beginPath()
-        ctx.arc(cx, cy, nebulaRadius, 0, Math.PI * 2)
-        ctx.fillStyle = grad
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2)
         ctx.fill()
       }
 
-      // 4. Draw Inter-cluster Centroid Backbones
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.018)'
-      ctx.lineWidth = 1 / camera.zoom
-      const cats = Object.keys(CATS_CONFIG)
-      for (let i = 0; i < cats.length; i++) {
-        for (let j = i + 1; j < cats.length; j++) {
-          const c1 = CATS_CONFIG[cats[i]]
-          const c2 = CATS_CONFIG[cats[j]]
+      // Links between models in the same cluster, with a pulse travelling along
+      // them — the only thing on screen suggesting these are live endpoints.
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i]
+          const b = nodes[j]
+          if (a.clusterKey !== b.clusterKey) continue
+          const distance = Math.hypot(a.x - b.x, a.y - b.y)
+          if (distance >= 145) continue
+
+          const strength = 1 - distance / 145
+          const low = Math.floor(0.12 * strength * 255).toString(16).padStart(2, '0')
+          const peak = Math.floor(0.85 * strength * 255).toString(16).padStart(2, '0')
+
+          const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y)
+          const position = ((t * 0.4 + a.phase) % 1 + 1) % 1
+          gradient.addColorStop(0, a.color + low)
+          gradient.addColorStop(Math.max(0, position - 0.12), a.color + low)
+          gradient.addColorStop(position, a.color + peak)
+          gradient.addColorStop(Math.min(1, position + 0.12), a.color + low)
+          gradient.addColorStop(1, a.color + low)
+
+          ctx.strokeStyle = gradient
+          ctx.lineWidth = 0.75 / camera.zoom
           ctx.beginPath()
-          ctx.moveTo(c1.x * W, c1.y * H)
-          ctx.lineTo(c2.x * W, c2.y * H)
+          ctx.moveTo(a.x, a.y)
+          ctx.lineTo(b.x, b.y)
           ctx.stroke()
         }
       }
 
-      // 5. Draw Intra-cluster Node Connections with Travelling Energy Shimmer
-      for (let i = 0; i < nodes.length; i++) {
-        const n1 = nodes[i]
-        for (let j = i + 1; j < nodes.length; j++) {
-          const n2 = nodes[j]
-          if (n1.catConfig.name === n2.catConfig.name) {
-            const dx = n1.x - n2.x
-            const dy = n1.y - n2.y
-            const dist = Math.sqrt(dx*dx + dy*dy)
-            if (dist < 145) {
-              const maxDistOpacity = 1 - (dist / 145)
-              
-              // Travelling energy pulse gradient
-              const rawPulse = (t * 0.4 + n1.phase) % 1.0
-              const pulsePos = rawPulse < 0 ? rawPulse + 1.0 : rawPulse
-              const grad = ctx.createLinearGradient(n1.x, n1.y, n2.x, n2.y)
-              const baseColor = n1.color
-              
-              const lowAlpha = Math.floor(0.12 * maxDistOpacity * 255).toString(16).padStart(2, '0')
-              const peakAlpha = Math.floor(0.85 * maxDistOpacity * 255).toString(16).padStart(2, '0')
-              
-              const p1 = Math.max(0, pulsePos - 0.12)
-              const p2 = pulsePos
-              const p3 = Math.min(1, pulsePos + 0.12)
-              
-              grad.addColorStop(0, baseColor + lowAlpha)
-              grad.addColorStop(p1, baseColor + lowAlpha)
-              grad.addColorStop(p2, baseColor + peakAlpha)
-              grad.addColorStop(p3, baseColor + lowAlpha)
-              grad.addColorStop(1, baseColor + lowAlpha)
+      for (const node of nodes) {
+        const cx = node.cluster.x * W
+        const cy = node.cluster.y * H
 
-              ctx.strokeStyle = grad
-              ctx.lineWidth = 0.75 / camera.zoom
-              ctx.beginPath()
-              ctx.moveTo(n1.x, n1.y)
-              ctx.lineTo(n2.x, n2.y)
-              ctx.stroke()
-            }
+        if (!reducedMotion) {
+          node.x += node.vx
+          node.y += node.vy
+
+          // Gentle attraction keeps a cluster together without freezing it.
+          const dx = cx - node.x
+          const dy = cy - node.y
+          const distance = Math.hypot(dx, dy) || 1
+          if (distance > 70) {
+            node.vx += (dx / distance) * 0.035
+            node.vy += (dy / distance) * 0.035
           }
+          node.vx *= 0.97
+          node.vy *= 0.97
+
+          if (node.x < 10) node.vx += 0.15
+          if (node.x > W - 10) node.vx -= 0.15
+          if (node.y < 10) node.vy += 0.15
+          if (node.y > H - 10) node.vy -= 0.15
+
+          node.trail.push({ x: node.x, y: node.y })
+          if (node.trail.length > 9) node.trail.shift()
         }
-      }
 
-      // 6. Update and Draw Nodes
-      for (const n of nodes) {
-        n.x += n.vx
-        n.y += n.vy
-        const cat = n.catConfig
-        const cx = cat.x * W
-        const cy = cat.y * H
-        const dx = cx - n.x
-        const dy = cy - n.y
-        const d = Math.sqrt(dx*dx + dy*dy) || 1
-        
-        // Cluster Attraction physics
-        if (d > 70) { 
-          n.vx += (dx/d) * 0.035; 
-          n.vy += (dy/d) * 0.035; 
-        }
-        
-        // Friction/drag
-        n.vx *= 0.97
-        n.vy *= 0.97
-        
-        // Bounds checking
-        if (n.x < 10) n.vx += 0.15; if (n.x > W-10) n.vx -= 0.15;
-        if (n.y < 10) n.vy += 0.15; if (n.y > H-10) n.vy -= 0.15;
+        const isHovered = hoveredNode?.model.id === node.model.id
+        const isSelected = selectedModelId === node.model.id
+        const pulse = reducedMotion ? 0.5 : 0.5 + 0.5 * Math.sin(t * 1.5 + node.phase)
+        const radius = isHovered ? node.radius * 1.55 : node.radius * (0.9 + 0.12 * pulse)
+        const opacity = isHovered ? 1 : 0.45 + 0.45 * pulse
 
-        // Cometary tail trail
-        n.trail.push({ x: n.x, y: n.y })
-        if (n.trail.length > 9) n.trail.shift()
-
-        const pulse = 0.5 + 0.5 * Math.sin(t * 1.5 + n.phase)
-        const isHovered = hoveredNodeRef.current && hoveredNodeRef.current.model.id === n.model.id
-        const r = isHovered ? n.radius * 1.55 : n.radius * (0.9 + 0.12 * pulse)
-        const alpha = isHovered ? 1.0 : 0.45 + 0.45 * pulse
-
-        // Draw trail
-        n.trail.forEach((pos, idx) => {
-          const trailAlpha = (idx / n.trail.length) * 0.13 * alpha
-          const trailRadius = r * (0.3 + 0.7 * (idx / n.trail.length))
+        node.trail.forEach((point, index) => {
+          const trailAlpha = (index / node.trail.length) * 0.13 * opacity
           ctx.beginPath()
-          ctx.arc(pos.x, pos.y, trailRadius, 0, Math.PI * 2)
-          ctx.fillStyle = n.color + Math.floor(trailAlpha * 255).toString(16).padStart(2, '0')
+          ctx.arc(point.x, point.y, radius * (0.3 + 0.7 * (index / node.trail.length)), 0, Math.PI * 2)
+          ctx.fillStyle = node.color + Math.floor(trailAlpha * 255).toString(16).padStart(2, '0')
           ctx.fill()
         })
 
-        // Draw core node dot
         ctx.beginPath()
-        ctx.arc(n.x, n.y, r, 0, Math.PI * 2)
-        ctx.fillStyle = n.color + Math.floor(alpha * 255).toString(16).padStart(2, '0')
+        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2)
+        ctx.fillStyle = node.color + Math.floor(opacity * 255).toString(16).padStart(2, '0')
         ctx.fill()
-        
-        // Draw hover target aura rings
-        if (isHovered) {
+
+        if (isHovered || isSelected) {
           ctx.beginPath()
-          ctx.arc(n.x, n.y, r + 5, 0, Math.PI * 2)
-          ctx.strokeStyle = n.color + '75'
+          ctx.arc(node.x, node.y, radius + 5, 0, Math.PI * 2)
+          ctx.strokeStyle = node.color + (isHovered ? '95' : '55')
           ctx.lineWidth = 1.25 / camera.zoom
           ctx.stroke()
         }
 
-        // 7. Immersive details fade-in: only draw label for the currently hovered node
-        if (isHovered) {
+        // Labelling every star at once is illegible; label only what is under
+        // the pointer, or what the user already picked.
+        if (isHovered || isSelected) {
           ctx.font = '500 8.5px "JetBrains Mono", monospace'
           ctx.fillStyle = '#ffffff'
           ctx.textAlign = 'left'
-          ctx.fillText(n.model.id.split('/').pop(), n.x + r + 7, n.y + 3)
+          ctx.fillText(node.model.id.split('/').pop(), node.x + radius + 7, node.y + 3)
         }
       }
 
-      // Draw active particles (hover sparkles)
-      particlesRef.current.forEach((p, idx) => {
+      // Iterate backwards so removing a spent particle cannot skip the next one.
+      for (let i = particlesRef.current.length - 1; i >= 0; i--) {
+        const p = particlesRef.current[i]
         p.x += p.vx
         p.y += p.vy
         p.alpha -= p.decay
         if (p.alpha <= 0) {
-          particlesRef.current.splice(idx, 1)
-        } else {
-          ctx.fillStyle = p.color + Math.floor(p.alpha * 255).toString(16).padStart(2, '0')
-          ctx.beginPath()
-          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
-          ctx.fill()
+          particlesRef.current.splice(i, 1)
+          continue
         }
-      })
-
-      // Draw category headers in world coordinates
-      const drawnLabels = new Set()
-      for (const n of nodes) {
-        if (!drawnLabels.has(n.catConfig.name)) {
-          drawnLabels.add(n.catConfig.name)
-          const cat = n.catConfig
-          ctx.font = '600 9.5px "JetBrains Mono", monospace'
-          ctx.fillStyle = cat.color + '45'
-          ctx.textAlign = 'center'
-          ctx.fillText(cat.name, cat.x * W, cat.y * H - 54)
-        }
+        ctx.fillStyle = p.color + Math.floor(p.alpha * 255).toString(16).padStart(2, '0')
+        ctx.beginPath()
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
+        ctx.fill()
       }
 
-      ctx.restore() // Restore matrix back to screen space for overlays
+      for (const [key, cluster] of Object.entries(CLUSTERS)) {
+        if (!nodes.some((n) => n.clusterKey === key)) continue
+        ctx.font = '600 9.5px "JetBrains Mono", monospace'
+        ctx.fillStyle = CATEGORY_COLORS[key] + '55'
+        ctx.textAlign = 'center'
+        ctx.fillText(cluster.name.toUpperCase(), cluster.x * W, cluster.y * H - 54)
+      }
 
-      // 8. Draw HUD Viewport Minimap in Screen Space
+      ctx.restore()
+
+      // Minimap, in screen space so it stays put while the map moves under it.
       const mmW = 150
       const mmH = 100
       const mmX = W - mmW - 24
       const mmY = H - mmH - 24
 
-      ctx.fillStyle = 'rgba(10, 14, 23, 0.75)'
+      ctx.fillStyle = 'rgba(3, 3, 9, 0.75)'
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
       ctx.lineWidth = 1
       ctx.beginPath()
@@ -329,490 +372,288 @@ export function Constellation({ models, setView, selectedModelId, setSelectedMod
       ctx.fill()
       ctx.stroke()
 
-      // Draw miniature representation of nodes
-      for (const n of nodes) {
-        const mx = mmX + (n.x / W) * mmW
-        const my = mmY + (n.y / H) * mmH
-        if (mx >= mmX && mx <= mmX + mmW && my >= mmY && my <= mmY + mmH) {
-          ctx.fillStyle = n.color + 'cc'
-          ctx.beginPath()
-          ctx.arc(mx, my, 1.8, 0, Math.PI * 2)
-          ctx.fill()
-        }
+      for (const node of nodes) {
+        const mx = mmX + (node.x / W) * mmW
+        const my = mmY + (node.y / H) * mmH
+        if (mx < mmX || mx > mmX + mmW || my < mmY || my > mmY + mmH) continue
+        ctx.fillStyle = node.color + 'cc'
+        ctx.beginPath()
+        ctx.arc(mx, my, 1.8, 0, Math.PI * 2)
+        ctx.fill()
       }
 
-      // Draw Viewport outline boundary
-      const vpW = W / camera.zoom
-      const vpH = H / camera.zoom
-      const vpX = camera.x - vpW / 2
-      const vpY = camera.y - vpH / 2
-
-      const mmVpX = mmX + (vpX / W) * mmW
-      const mmVpY = mmY + (vpY / H) * mmH
-      const mmVpW = (vpW / W) * mmW
-      const mmVpH = (vpH / H) * mmH
-
-      ctx.strokeStyle = '#f5a93d'
+      const viewW = W / camera.zoom
+      const viewH = H / camera.zoom
+      const boxX = Math.max(mmX, mmX + ((camera.x - viewW / 2) / W) * mmW)
+      const boxY = Math.max(mmY, mmY + ((camera.y - viewH / 2) / H) * mmH)
+      ctx.strokeStyle = '#a78bfa'
       ctx.lineWidth = 1.2
       ctx.strokeRect(
-        Math.max(mmX, mmVpX), 
-        Math.max(mmY, mmVpY), 
-        Math.min(mmW - (Math.max(mmX, mmVpX) - mmX), mmVpW), 
-        Math.min(mmH - (Math.max(mmY, mmVpY) - mmY), mmVpH)
+        boxX,
+        boxY,
+        Math.min(mmW - (boxX - mmX), (viewW / W) * mmW),
+        Math.min(mmH - (boxY - mmY), (viewH / H) * mmH),
       )
 
-      animFrame = requestAnimationFrame(draw)
+      frame = requestAnimationFrame(draw)
     }
 
     draw()
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [models, reducedMotion, selectedModelId])
 
-    return () => cancelAnimationFrame(animFrame)
-  }, [models])
-
-  // Canvas Mouse interaction handlers
-  const handleMouseDown = (e) => {
-    if (isTransitioningRef.current) return
-    isDraggingRef.current = true
-    dragStartRef.current = { x: e.clientX, y: e.clientY }
-    cameraStartRef.current = { x: cameraRef.current.x, y: cameraRef.current.y }
-  }
-
-  const handleMouseMove = (e) => {
+  // Zoom needs a native listener: React registers `wheel` passively, so
+  // `preventDefault` inside onWheel is ignored and the page scrolls instead.
+  useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    const screenX = e.clientX - rect.left
-    const screenY = e.clientY - rect.top
 
-    // Convert mouse screen coordinates to world position
+    const handleWheel = (e) => {
+      e.preventDefault()
+      if (warpingRef.current) return
+      const point = toWorld(e.clientX, e.clientY)
+      if (!point) return
+
+      const camera = cameraRef.current
+      const next = Math.max(ZOOM_MIN, Math.min(
+        ZOOM_MAX,
+        e.deltaY < 0 ? camera.targetZoom * ZOOM_STEP : camera.targetZoom / ZOOM_STEP,
+      ))
+
+      // Keep whatever is under the cursor pinned there as the scale changes.
+      camera.targetZoom = next
+      camera.targetX = point.worldX - (point.screenX - point.rect.width / 2) / next
+      camera.targetY = point.worldY - (point.screenY - point.rect.height / 2) / next
+      setZoom(next)
+    }
+
+    canvas.addEventListener('wheel', handleWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', handleWheel)
+  }, [toWorld])
+
+  // ── Pointer interaction (mouse, pen and touch share one path) ────────────
+  const handlePointerDown = (e) => {
+    if (warpingRef.current) return
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    hoverAtPressRef.current = hoveredRef.current
+    dragRef.current = {
+      active: true,
+      pointerX: e.clientX,
+      pointerY: e.clientY,
+      cameraX: cameraRef.current.x,
+      cameraY: cameraRef.current.y,
+      moved: false,
+    }
+    setIsPanning(true)
+  }
+
+  const handlePointerMove = (e) => {
+    const point = toWorld(e.clientX, e.clientY)
+    if (!point) return
+    const drag = dragRef.current
     const camera = cameraRef.current
-    const worldX = camera.x + (screenX - rect.width / 2) / camera.zoom
-    const worldY = camera.y + (screenY - rect.height / 2) / camera.zoom
 
-    mouseScreenPosRef.current = { x: screenX, y: screenY }
-    mouseWorldPosRef.current = { x: worldX, y: worldY }
+    if (drag.active) {
+      const dx = e.clientX - drag.pointerX
+      const dy = e.clientY - drag.pointerY
+      // A few pixels of travel is a click, not a pan — otherwise a slightly
+      // shaky tap would never open anything.
+      if (Math.hypot(dx, dy) > 4) drag.moved = true
+      camera.targetX = drag.cameraX - dx / camera.zoom
+      camera.targetY = drag.cameraY - dy / camera.zoom
+      return
+    }
 
-    if (isDraggingRef.current) {
-      const dx = e.clientX - dragStartRef.current.x
-      const dy = e.clientY - dragStartRef.current.y
-      // Pan camera inverse of mouse vector adjusted for current zoom
-      camera.targetX = cameraStartRef.current.x - dx / camera.zoom
-      camera.targetY = cameraStartRef.current.y - dy / camera.zoom
-    } else {
-      // Find hovered node
-      let found = null
-      const nodes = nodesRef.current
-      for (let i = nodes.length - 1; i >= 0; i--) {
-        const n = nodes[i]
-        const dx = n.x - worldX
-        const dy = n.y - worldY
-        const hitRadius = Math.max(n.radius + 6, 12)
-        if (dx*dx + dy*dy <= hitRadius * hitRadius) {
-          found = n
-          break
-        }
+    // Topmost node wins, so overlapping stars pick the one drawn last.
+    let found = null
+    const nodes = nodesRef.current
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const node = nodes[i]
+      const hitRadius = Math.max(node.radius + 6, 12)
+      if ((node.x - point.worldX) ** 2 + (node.y - point.worldY) ** 2 <= hitRadius ** 2) {
+        found = node
+        break
       }
+    }
 
-      if (found?.model.id !== hoveredNodeRef.current?.model.id) {
-        hoveredNodeRef.current = found
-        setHoveredNode(found)
-        if (found) {
-          // Emit burst sparkles
-          for (let k = 0; k < 15; k++) {
-            particlesRef.current.push({
-              x: found.x,
-              y: found.y,
-              vx: (Math.random() - 0.5) * 2.5,
-              vy: (Math.random() - 0.5) * 2.5,
-              size: Math.random() * 2 + 1,
-              color: found.color,
-              alpha: 1.0,
-              decay: 0.02 + Math.random() * 0.03
-            })
-          }
+    if (found?.model.id !== hoveredRef.current?.model.id) {
+      hoveredRef.current = found
+      setHovered(found)
+      if (found && !reducedMotion) {
+        for (let k = 0; k < 15; k++) {
+          particlesRef.current.push({
+            x: found.x,
+            y: found.y,
+            vx: (Math.random() - 0.5) * 2.5,
+            vy: (Math.random() - 0.5) * 2.5,
+            size: Math.random() * 2 + 1,
+            color: found.color,
+            alpha: 1,
+            decay: 0.02 + Math.random() * 0.03,
+          })
         }
       }
     }
   }
 
-  const handleMouseUp = () => {
-    isDraggingRef.current = false
+  const handlePointerUp = (e) => {
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    dragRef.current.active = false
+    setIsPanning(false)
   }
 
-  const handleWheel = (e) => {
-    e.preventDefault()
-    if (isTransitioningRef.current) return
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    const screenX = e.clientX - rect.left
-    const screenY = e.clientY - rect.top
+  const handlePointerLeave = () => {
+    dragRef.current.active = false
+    setIsPanning(false)
+    hoveredRef.current = null
+    setHovered(null)
+  }
 
-    // Keep world coordinate under pointer locked to same screen coordinate
-    const worldX = cameraRef.current.x + (screenX - rect.width / 2) / cameraRef.current.zoom
-    const worldY = cameraRef.current.y + (screenY - rect.height / 2) / cameraRef.current.zoom
+  /** Flies the camera into a model, then opens its workspace. */
+  const openModel = useCallback((node) => {
+    if (!node || warpingRef.current) return
+    warpingRef.current = true
 
-    const zoomStep = 1.15
-    let newTargetZoom = cameraRef.current.targetZoom
-    if (e.deltaY < 0) {
-      newTargetZoom *= zoomStep
-    } else {
-      newTargetZoom /= zoomStep
+    const finish = () => {
+      setView(node.cluster.view)
+      setSelectedModelId(node.model.id)
     }
-    // Clamp zoom scale
-    newTargetZoom = Math.max(0.35, Math.min(4.5, newTargetZoom))
 
-    cameraRef.current.targetZoom = newTargetZoom
-    cameraRef.current.targetX = worldX - (screenX - rect.width / 2) / newTargetZoom
-    cameraRef.current.targetY = worldY - (screenY - rect.height / 2) / newTargetZoom
-  }
-
-  // Click handler to initiate smooth fly-in warp transition
-  const handleMouseClick = () => {
-    const hovered = hoveredNodeRef.current
-    if (hovered && !isTransitioningRef.current) {
-      isTransitioningRef.current = true
-      cameraRef.current.targetX = hovered.x
-      cameraRef.current.targetY = hovered.y
-      cameraRef.current.targetZoom = 3.5 // Fly close!
-
-      setTimeout(() => {
-        setFadeOut(true)
-        setTimeout(() => {
-          // Open target view based on category
-          if (hovered.catConfig.name === 'REASONING') setView('reasoning')
-          else if (hovered.catConfig.name === 'EMBEDDING') setView('embeddings')
-          else if (hovered.catConfig.name === 'VISION') setView('vision')
-          else if (hovered.catConfig.name === 'CODE') setView('code')
-          else setView('arena')
-          
-          setSelectedModelId(hovered.model.id)
-        }, 450)
-      }, 700)
+    if (reducedMotion) {
+      finish()
+      return
     }
+
+    cameraRef.current.targetX = node.x
+    cameraRef.current.targetY = node.y
+    cameraRef.current.targetZoom = 3.5
+    setZoom(3.5)
+
+    const warp = setTimeout(() => {
+      setFadeOut(true)
+      const fade = setTimeout(finish, FADE_MS)
+      timersRef.current.push(fade)
+    }, WARP_MS)
+    timersRef.current.push(warp)
+  }, [reducedMotion, setView, setSelectedModelId])
+
+  // Cancel pending transitions if the view unmounts mid-warp.
+  useEffect(() => () => timersRef.current.forEach(clearTimeout), [])
+
+  const handleClick = () => {
+    // A pan that ended over a star should not also open it.
+    if (dragRef.current.moved) return
+    const node = hoveredRef.current
+    if (!node) return
+    // Touch has no hover state, so the first tap only inspects.
+    if (isMobile && hoverAtPressRef.current?.model.id !== node.model.id) return
+    openModel(node)
   }
 
-  const zoomTo = (level) => {
-    cameraRef.current.targetZoom = level
+  const applyZoom = (next) => {
+    const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next))
+    cameraRef.current.targetZoom = clamped
+    setZoom(clamped)
   }
 
   const resetCamera = () => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    cameraRef.current.targetX = rect.width / 2
-    cameraRef.current.targetY = rect.height / 2
-    cameraRef.current.targetZoom = 0.95
-  }
-
-  // Calculate coordinates of hover card in screen space
-  let cardStyle = {}
-  if (hoveredNode && canvasRef.current) {
-    const canvas = canvasRef.current
-    const rect = canvas.getBoundingClientRect()
-    const isMobile = window.innerWidth < 768
-
-    if (isMobile) {
-      cardStyle = {
-        position: 'absolute',
-        left: '12px',
-        right: '12px',
-        bottom: '12px',
-        backgroundColor: 'rgba(26, 23, 16, 0.9)',
-        backdropFilter: 'blur(16px)',
-        border: `1.5px solid ${hoveredNode.color}60`,
-        boxShadow: 'var(--clay-shadow-dark)',
-        borderRadius: '18px',
-        padding: '16px',
-        pointerEvents: 'none',
-        zIndex: 100,
-        opacity: fadeOut ? 0 : 1,
-        transition: 'opacity 0.25s',
-      }
-    } else {
-      const screenX = rect.width / 2 + (hoveredNode.x - cameraRef.current.x) * cameraRef.current.zoom
-      const screenY = rect.height / 2 + (hoveredNode.y - cameraRef.current.y) * cameraRef.current.zoom
-      
-      // Avoid tooltip going off screen right or bottom
-      const isRightHalf = screenX > rect.width / 2
-      const isBottomHalf = screenY > rect.height / 2
-
-      cardStyle = {
-        position: 'absolute',
-        left: isRightHalf ? `${screenX - 360}px` : `${screenX + 20}px`,
-        top: isBottomHalf ? `${screenY - 200}px` : `${screenY + 20}px`,
-        width: '340px',
-        backgroundColor: 'rgba(26, 23, 16, 0.75)',
-        backdropFilter: 'blur(16px)',
-        border: `1.5px solid ${hoveredNode.color}60`,
-        boxShadow: 'var(--clay-shadow-dark)',
-        borderRadius: '18px',
-        padding: '20px',
-        pointerEvents: 'none',
-        zIndex: 100,
-        opacity: fadeOut ? 0 : 1,
-        transition: 'opacity 0.25s, transform 0.2s',
-        transform: 'scale(1)'
-      }
-    }
-  }
-
-  const getModelCapability = (m) => {
-    const id = m.id.toLowerCase()
-    if (id.includes('llama-3.1-405b') || id.includes('405b')) return 'Frontier-class reasoning, math & synthetic data generation.'
-    if (id.includes('deepseek') || id.includes('reasoning')) return 'Multi-step reasoning chain with deep logical search.'
-    if (id.includes('vision') || id.includes('vl')) return 'High-resolution visual recognition and OCR processing.'
-    if (id.includes('embed')) return 'Dense mathematical text semantic vector indexing.'
-    if (id.includes('nemotron')) return 'NVIDIA fine-tuned general purpose conversational agent.'
-    return 'Optimized cloud deployment for low-latency specialized tasks.'
+    const { width, height } = sizeRef.current
+    cameraRef.current.targetX = width / 2
+    cameraRef.current.targetY = height / 2
+    applyZoom(0.95)
   }
 
   return (
-    <div ref={wrapperRef} style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', backgroundColor: 'var(--bg-void)' }}>
+    <div ref={wrapperRef} style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', background: 'var(--bg-void)' }}>
       <div className="dot-grid" style={{ opacity: 0.05 }} />
 
-      {/* Screen crossfade transition overlay */}
-      <div style={{
-        position: 'absolute',
-        inset: 0,
-        backgroundColor: 'var(--bg-void)',
-        opacity: fadeOut ? 1 : 0,
-        pointerEvents: 'none',
-        transition: 'opacity 0.45s cubic-bezier(0.2, 0.8, 0.2, 1)',
-        zIndex: 999
-      }} />
-
-      <canvas 
-        ref={canvasRef} 
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        onWheel={handleWheel}
-        onClick={handleMouseClick}
-        style={{ 
-          position: 'absolute', 
-          inset: 0, 
-          width: '100%', 
-          height: '100%', 
-          cursor: isDraggingRef.current ? 'grabbing' : hoveredNode ? 'pointer' : 'grab' 
+      <div
+        aria-hidden="true"
+        style={{
+          position: 'absolute', inset: 0, background: 'var(--bg-void)',
+          opacity: fadeOut ? 1 : 0, pointerEvents: 'none',
+          transition: `opacity ${FADE_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1)`, zIndex: 999,
         }}
       />
-      
-      {/* Floating Rich Glass Inspection Tooltip */}
-      {hoveredNode && (
-        <div style={cardStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-            <span style={{ 
-              backgroundColor: `${hoveredNode.catConfig.color}20`, 
-              color: hoveredNode.catConfig.color,
-              padding: '3px 8px',
-              borderRadius: '6px',
-              fontSize: '10px',
-              fontWeight: 700,
-              letterSpacing: '0.1em',
-              fontFamily: "'JetBrains Mono', monospace",
-              border: `1px solid ${hoveredNode.catConfig.color}40`
-            }}>
-              {hoveredNode.catConfig.name}
+
+      <canvas
+        ref={canvasRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerLeave={handlePointerLeave}
+        onClick={handleClick}
+        aria-label={`Map of ${models.length} models. Use the model list in each workspace as an alternative.`}
+        style={{
+          position: 'absolute', inset: 0, width: '100%', height: '100%',
+          touchAction: 'none', // Own the gesture; otherwise the browser scrolls.
+          cursor: isPanning ? 'grabbing' : hovered ? 'pointer' : 'grab',
+        }}
+      />
+
+      {hovered && (
+        <div
+          className={`glass-card constellation-card${isMobile ? ' constellation-card-mobile' : ''}`}
+          style={{ borderColor: `${hovered.color}60`, opacity: fadeOut ? 0 : 1 }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+            <span
+              className="constellation-cat"
+              style={{ color: hovered.color, background: `${hovered.color}20`, borderColor: `${hovered.color}40` }}
+            >
+              {hovered.cluster.name}
             </span>
-            <span style={{ 
-              backgroundColor: 'rgba(255,255,255,0.04)', 
-              color: 'var(--text-secondary)',
-              padding: '3px 8px',
-              borderRadius: '4px',
-              fontSize: '10px',
-              fontFamily: "'JetBrains Mono', monospace"
-            }}>
-              {hoveredNode.model.contextWindow}
-            </span>
+            <span className="constellation-ctx">{hovered.model.contextWindow} context</span>
           </div>
 
-          <div style={{ 
-            color: 'var(--text-primary)', 
-            fontSize: '15px', 
-            fontWeight: 600, 
-            marginBottom: '6px', 
-            fontFamily: "'JetBrains Mono', monospace",
-            wordBreak: 'break-all',
-            lineHeight: 1.3
-          }}>
-            {hoveredNode.model.id.split('/').pop()}
-          </div>
-          
-          <div style={{ 
-            color: 'var(--text-secondary)', 
-            fontSize: '11px', 
-            marginBottom: '12px', 
-            fontFamily: "'Inter', sans-serif" 
-          }}>
-            by {hoveredNode.model.providerName}
-          </div>
-
-          <div style={{ 
-            color: 'rgba(255,255,255,0.65)', 
-            fontSize: '12.5px', 
-            lineHeight: 1.4,
-            marginBottom: '20px',
-            borderTop: '1px solid rgba(255,255,255,0.06)',
-            paddingTop: '12px'
-          }}>
-            {getModelCapability(hoveredNode.model)}
-          </div>
-
-          <div style={{
-            color: hoveredNode.color,
-            fontSize: '11px',
-            fontWeight: 700,
-            letterSpacing: '0.08em',
-            fontFamily: "'JetBrains Mono', monospace",
-            display: 'flex',
-            alignItems: 'center',
-            gap: '4px'
-          }}>
-            Click to open {
-              hoveredNode.catConfig.name === 'REASONING' ? 'REASONING ENGINE' :
-              hoveredNode.catConfig.name === 'EMBEDDING' ? 'EMBEDDING SEARCH' :
-              hoveredNode.catConfig.name === 'VISION' ? 'VISION LAB' :
-              hoveredNode.catConfig.name === 'CODE' ? 'CODE LAB' : 'CHAT ARENA'
-            } → <span className="terminal-cursor" style={{ margin: 0, width: '4px', height: '8px', backgroundColor: hoveredNode.color }} />
+          <div className="constellation-title">{hovered.model.id.split('/').pop()}</div>
+          <div className="constellation-provider">by {hovered.model.providerName}</div>
+          <p className="constellation-desc">{describeModel(hovered.model)}</p>
+          <div className="constellation-cta" style={{ color: hovered.color }}>
+            {isMobile ? 'Tap' : 'Click'} to open {hovered.cluster.workspace} →
           </div>
         </div>
       )}
 
-      {/* Floating HUD Camera Panel */}
-      <div className="glass-card" style={{
-        position: 'absolute',
-        top: '20px',
-        left: '20px',
-        padding: '12px 16px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-        zIndex: 5,
-        transition: 'none',
-        transform: 'none'
-      }}>
+      {/* Map controls */}
+      <div className="glass-card constellation-hud">
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span style={{ fontSize: '10px', fontFamily: "'JetBrains Mono', monospace", color: 'var(--amber-c)', fontWeight: 700 }}>
-            Map Controls
-          </span>
-          <span style={{
-            fontSize: '9px',
-            fontFamily: "'JetBrains Mono', monospace",
-            color: 'var(--text-secondary)',
-            backgroundColor: 'rgba(255,255,255,0.05)',
-            padding: '2px 5px',
-            borderRadius: '4px'
-          }}>
-            {(cameraRef.current.targetZoom).toFixed(2)}x
-          </span>
+          <span className="field-caption" style={{ color: 'var(--nebula-glow)' }}>Map</span>
+          <span className="constellation-zoom">{zoom.toFixed(2)}×</span>
         </div>
-        
         <div style={{ display: 'flex', gap: '8px' }}>
-          <button 
-            onClick={() => zoomTo(Math.min(4.5, cameraRef.current.targetZoom * 1.3))}
-            className="btn"
-            style={{
-              width: '32px',
-              height: '32px',
-              padding: 0,
-              borderRadius: '8px',
-              fontSize: '14px',
-              lineHeight: 1
-            }}
-          >
-            +
-          </button>
-          <button 
-            onClick={() => zoomTo(Math.max(0.35, cameraRef.current.targetZoom / 1.3))}
-            className="btn"
-            style={{
-              width: '32px',
-              height: '32px',
-              padding: 0,
-              borderRadius: '8px',
-              fontSize: '14px',
-              lineHeight: 1
-            }}
-          >
-            -
-          </button>
-          <button 
-            onClick={resetCamera}
-            className="btn"
-            style={{
-              height: '32px',
-              padding: '0 12px',
-              borderRadius: '8px',
-              fontSize: '9.5px'
-            }}
-          >
-            RESET
-          </button>
-          <button 
+          <button type="button" className="btn hud-btn" onClick={() => applyZoom(zoom * 1.3)} aria-label="Zoom in">+</button>
+          <button type="button" className="btn hud-btn" onClick={() => applyZoom(zoom / 1.3)} aria-label="Zoom out">−</button>
+          <button type="button" className="btn" onClick={resetCamera} style={{ height: '32px', padding: '0 12px', fontSize: '9.5px' }}>Reset</button>
+          <button
+            type="button"
+            className={`btn hud-btn${showHelp ? ' btn-primary' : ''}`}
             onClick={() => setShowHelp(!showHelp)}
-            className={`btn ${showHelp ? 'btn-primary' : ''}`}
-            style={{
-              width: '32px',
-              height: '32px',
-              padding: 0,
-              borderRadius: '8px',
-              fontSize: '11px',
-              fontWeight: 700
-            }}
+            aria-expanded={showHelp}
+            aria-label="Toggle map help"
           >
             ?
           </button>
         </div>
       </div>
 
-      {/* Floating Immersive HUD Instructions Guide */}
       {showHelp && (
-        <div className="glass-card" style={{
-          position: 'absolute',
-          bottom: '24px',
-          left: '20px',
-          padding: '16px 20px',
-          width: '320px',
-          zIndex: 5,
-          transition: 'none',
-          transform: 'none'
-        }}>
+        <div className="glass-card constellation-help">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <span style={{ fontSize: '11px', fontFamily: "'JetBrains Mono', monospace", color: 'var(--amber-c)', fontWeight: 700, letterSpacing: '0.05em' }}>
-              milkyway.ai Guide
-            </span>
-            <span 
-              onClick={() => setShowHelp(false)}
-              style={{ fontSize: '10px', color: 'var(--text-secondary)', cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace", transition: 'color 0.2s' }}
-              onMouseOver={e => e.target.style.color = 'var(--text-primary)'}
-              onMouseOut={e => e.target.style.color = 'var(--text-secondary)'}
-            >
-              [CLOSE]
-            </span>
+            <span className="field-caption" style={{ color: 'var(--nebula-glow)' }}>Getting around</span>
+            <button type="button" className="msg-copy" onClick={() => setShowHelp(false)}>Close</button>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", fontSize: '11px' }}>DRAG</span>
-              <span>Pan the map</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", fontSize: '11px' }}>SCROLL</span>
-              <span>Zoom in & out</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", fontSize: '11px' }}>HOVER</span>
-              <span>Inspect capabilities</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", fontSize: '11px' }}>CLICK</span>
-              <span>Select & prototype</span>
-            </div>
-          </div>
+          <dl className="constellation-keys">
+            <dt>{isMobile ? 'Drag' : 'Drag'}</dt><dd>Move the map</dd>
+            <dt>{isMobile ? 'Pinch' : 'Scroll'}</dt><dd>Zoom in and out</dd>
+            <dt>{isMobile ? 'Tap' : 'Hover'}</dt><dd>Inspect a model</dd>
+            <dt>{isMobile ? 'Tap again' : 'Click'}</dt><dd>Open its workspace</dd>
+          </dl>
         </div>
       )}
     </div>
   )
 }
-

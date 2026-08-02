@@ -17,6 +17,7 @@ Welcome to the **milkyway.ai** comprehensive developer documentation. This guide
 5. [State Management & Global Hooks](#5-state-management--global-hooks)
 6. [Mobile Design System & CSS Variables](#6-mobile-design-system--css-variables)
 7. [Local Setup & Deployment Instructions](#7-local-setup--deployment-instructions)
+8. [Model Availability & Health](#8-model-availability--health)
 
 ---
 
@@ -24,13 +25,29 @@ Welcome to the **milkyway.ai** comprehensive developer documentation. This guide
 
 **milkyway.ai** is a deep-space developer dashboard designed to interactively showcase, benchmark, and prototype application models packaged as NVIDIA Inference Microservices (NIMs). The workspace is designed around an astronomical theme where models are represented as stars in a unified galaxy.
 
-The application contains five main playgrounds:
-1. **Constellation**: An interactive 2D star map representing the model directory.
-2. **Chat Arena**: A side-by-side prompt laboratory with custom system prompts and parameter controls.
-3. **CodeLab**: A programming workspace with code-specific compilation output.
-4. **Reasoning Engine**: A multi-step logic laboratory designed to output reasoning chains.
-5. **Embedding Search**: A 2D coordinate-space mapping document similarities using cosine distance.
-6. **Vision Lab**: A visual query playground including a canvas-based crop/scan simulator.
+The application contains six workspaces:
+1. **Constellation**: An interactive 2D star map of the model catalog.
+2. **Chat Arena**: A prompt laboratory with custom system prompts and parameter controls.
+3. **CodeLab**: A programming workspace that lifts code blocks out of replies.
+4. **Reasoning Engine**: Shows a model's chain of thought beside its conclusion.
+5. **Embedding Search**: Maps document similarity in 2D using cosine distance.
+6. **Vision Lab**: Image question answering, plus a canvas-based region probe.
+
+### Module map
+
+```
+src/
+├── api/nvidia.js          Gateway client: SSE parsing, streaming, cancellation
+├── theme.js               Palette for canvas code (CSS vars do not work there)
+├── hooks/                 useApiKey, useModels, useStream, useModelPicker,
+│                          useStreamTelemetry, useMediaQuery
+├── lib/                   providers (model → publisher), errors (message → guidance),
+│                          clipboard
+├── components/
+│   ├── shared/            ModelSelect, MarkdownMessage, StreamTelemetry
+│   └── <workspace>/       One directory per workspace
+└── index.css              Design tokens and every shared class
+```
 
 ---
 
@@ -51,7 +68,7 @@ graph TD
 ```
 
 ### Serverless Rewrite Definition
-In [netlify.toml](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/netlify.toml), a rewrite route transparently maps all `/api/nvidia/*` path requests directly to the NVIDIA API gateway, automatically appending splat coordinates:
+In [netlify.toml](netlify.toml), a rewrite route transparently maps all `/api/nvidia/*` path requests directly to the NVIDIA API gateway, automatically appending splat coordinates:
 
 ```toml
 [[redirects]]
@@ -67,7 +84,7 @@ During local development, the Vite server uses built-in proxy overrides matching
 
 ## 3. API Integrations & Streaming Protocols
 
-All communication with the underlying model endpoints is declared in [nvidia.js](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/api/nvidia.js). The module uses **Server-Sent Events (SSE)** and JavaScript Generator functions (`async function*`) to stream tokens in real time.
+All communication with the underlying model endpoints is declared in [nvidia.js](src/api/nvidia.js). The module uses **Server-Sent Events (SSE)** and JavaScript Generator functions (`async function*`) to stream tokens in real time.
 
 ### Streaming Mechanics
 Each response from the API is read chunk by chunk using a `ReadableStreamDefaultReader` and translated back to plain text via a standard `TextDecoder`. Because network packets can slice JSON chunks mid-character, the parser maintains an internal buffer to sew lines together:
@@ -78,24 +95,49 @@ const lines = buffer.split('\n')
 buffer = lines.pop() // Hold the incomplete trailing line in buffer
 ```
 
+All four streaming helpers share one parser, `streamSSE`. Buffering, `[DONE]`
+handling, malformed-frame recovery, and reader cleanup live there rather than
+being repeated per endpoint.
+
 ### Reasoning Stream Extraction
-Reasoning models (like DeepSeek R1) output special `<think>` and `</think>` tags enclosing their internal logic before yielding the final answer. To prevent this raw tag clutter in the main viewport, the `streamReasoning` generator intercepts the tokens and classifies them:
+
+Reasoning models publish their chain of thought in one of two ways, and
+`streamReasoning` handles both.
+
+**A separate delta field.** Current NIM reasoning models — the Nemotron family,
+DeepSeek-R1 and similar — return their working in `reasoning_content` (some
+spell it `reasoning`), alongside the answer in `content`:
 
 ```javascript
-if (delta.includes('<think>')) {
-  inThink = true;
-  yield { type: 'thinking', content: delta.replace('<think>', '') }
-} else if (delta.includes('</think>')) {
-  inThink = false;
-  const parts = delta.split('</think>')
-  if (parts[0]) yield { type: 'thinking', content: parts[0] }
-  if (parts[1]) yield { type: 'answer', content: parts[1] }
-} else {
-  yield { type: inThink ? 'thinking' : 'answer', content: delta }
+const reasoningDelta = (chunk) => {
+  const delta = chunk.choices?.[0]?.delta
+  return delta?.reasoning_content || delta?.reasoning || ''
 }
 ```
 
-This yields a structured stream of typed segments, feeding the reasoning waveform and process step logs separately.
+**Inline tags.** Older models wrap their working in `<think>…</think>` inside
+`content`. A single delta can straddle the closing tag, so it is split and each
+half routed to its own channel:
+
+```javascript
+if (text.includes('</think>')) {
+  inThinkTag = false
+  const [thought, answer] = text.split('</think>')
+  if (thought) yield { type: 'thinking', content: thought }
+  if (answer) yield { type: 'answer', content: answer }
+}
+```
+
+Either path produces the same typed stream — `{ type: 'thinking' | 'answer' }` —
+which `useStream` routes into separate fields on the message, so the workspace
+can show working and conclusion side by side.
+
+### Cancellation
+
+Every request accepts an `AbortSignal`. `useStream` exposes `stop()`, which
+aborts the in-flight request, keeps whatever streamed in, and does not surface
+an error — `isAbortError()` distinguishes a deliberate stop from a failure.
+Workspaces abort on unmount, so navigating away stops paying for tokens.
 
 ---
 
@@ -104,7 +146,7 @@ This yields a structured stream of typed segments, feeding the reasoning wavefor
 This section explains the visual features and underlying mathematical models utilized in the visual layers of the dashboard.
 
 ### Constellation Visualizer
-Located in [Constellation.jsx](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/components/constellation/Constellation.jsx), this dashboard renders a dynamic, interactive celestial map of available models on an HTML5 `<canvas>` using a custom physical camera system.
+Located in [Constellation.jsx](src/components/constellation/Constellation.jsx), this dashboard renders a dynamic, interactive celestial map of available models on an HTML5 `<canvas>` using a custom physical camera system.
 
 #### 1. Coordinate Transforms
 To support panning and zooming, the visualizer maps screen mouse positions to the virtual "world" coordinate space and back. 
@@ -127,7 +169,7 @@ Where the dampening factor \(K \approx 0.08\) per frame.
 ---
 
 ### Text Embeddings & Physics Mapping
-Located in [EmbeddingSearch.jsx](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/components/embeddings/EmbeddingSearch.jsx), this playground maps text nodes in a 2D vector space.
+Located in [EmbeddingSearch.jsx](src/components/embeddings/EmbeddingSearch.jsx), this playground maps text nodes in a 2D vector space.
 
 #### 1. Cosine Similarity Mathematics
 Embeddings translate sentences into high-dimensional coordinate arrays. When a user runs a similarity search, the application calculates the cosine similarity between the query vector \(\mathbf{Q}\) and each document vector \(\mathbf{D}\):
@@ -158,7 +200,7 @@ graph LR
 ---
 
 ### Reasoning Waveform Engine
-In [ReasoningEngine.jsx](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/components/reasoning/ReasoningEngine.jsx), a synthetic brainwave waveform is drawn in real time during model inference.
+In [ReasoningEngine.jsx](src/components/reasoning/ReasoningEngine.jsx), a synthetic brainwave waveform is drawn in real time during model inference.
 
 #### Waveform Synthesis Equation
 The canvas renders multiple overlapping sine waves. The vertical coordinate \(y\) of each line at horizontal coordinate \(x\) is calculated using a dynamic amplitude, frequency, and phase offset:
@@ -176,7 +218,7 @@ Where:
 ---
 
 ### CodeLab Compiler View
-In [CodeLab.jsx](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/components/code/CodeLab.jsx), a developer interface splits space between code instruction logs and the preview terminal.
+In [CodeLab.jsx](src/components/code/CodeLab.jsx), a developer interface splits space between code instruction logs and the preview terminal.
 - **Markdown Renderer**: Processes standard codeblocks, applying syntax styling using Prism style tokens.
 - **Toggle Parameter Deck**: Responsive states automatically collapse parameter columns (`showParams`) on mobile viewports:
   ```javascript
@@ -186,7 +228,7 @@ In [CodeLab.jsx](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-sh
 ---
 
 ### Vision Lab Scanner
-In [VisionLab.jsx](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/components/vision/VisionLab.jsx), a canvas overlay mimics a scanner frame. It allows developers to feed an image base64 coordinate array to a vision model (such as NVIDIA's Nemotron Vision NIM) and stream back descriptions or text extraction:
+In [VisionLab.jsx](src/components/vision/VisionLab.jsx), a canvas overlay mimics a scanner frame. It allows developers to feed an image base64 coordinate array to a vision model (such as NVIDIA's Nemotron Vision NIM) and stream back descriptions or text extraction:
 - **Base64 Packaging**: Encapsulates selected images inside standard data URI messages:
   ```javascript
   { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } }
@@ -196,31 +238,86 @@ In [VisionLab.jsx](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-
 
 ## 5. State Management & Global Hooks
 
-The application state is distributed in modular custom hooks:
-1. [useApiKey.js](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/hooks/useApiKey.js): Coordinates retrieving/saving user API keys inside browser `localStorage`.
-2. [useModels.js](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/hooks/useModels.js): Dispatches async queries to retrieve list profiles of available models, sorting them by categories (chat, reasoning, embedding, etc.).
-3. [useStream.js](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/hooks/useStream.js): State machine wrapper handling the active message array, streaming flags, connection status, and error states.
+State lives in custom hooks rather than a store — the app has no cross-workspace
+state beyond the API key and the model catalog.
+
+| Hook | Responsibility |
+| --- | --- |
+| [useApiKey.js](src/hooks/useApiKey.js) | Resolves the key from `import.meta.env` or `localStorage`, synchronously on first render so the key modal never flashes for someone who already has one. |
+| [useModels.js](src/hooks/useModels.js) | Fetches the catalog, decorates each entry with category and context window, and caches it per key. |
+| [useStream.js](src/hooks/useStream.js) | Owns the transcript: sends a turn, appends tokens, exposes `stop()`. |
+| [useModelPicker.js](src/hooks/useModelPicker.js) | Resolves which model a workspace is using. |
+| [useStreamTelemetry.js](src/hooks/useStreamTelemetry.js) | Measures time-to-first-token and throughput. |
+| [useMediaQuery.js](src/hooks/useMediaQuery.js) | Breakpoint and `prefers-reduced-motion` state. |
+
+### Deriving, not syncing
+
+Two patterns recur, both chosen to avoid an effect that writes state:
+
+**Model selection** is derived, never stored. Three inputs compete — a choice
+made in this workspace, a model carried in from the map, and a default — and
+`useModelPicker` resolves the winner on every render. Syncing that into state
+from an effect would render one frame with the wrong model selected.
+
+**Embedding index validity** is derived from the model id. Each document records
+which model produced its vector; a document counts as indexed only when that
+matches the current selection. Switching models therefore invalidates the index
+by derivation, with no reset to run — and it *must* invalidate, because a vector
+from one model scored against a query vector from another produces noise, not
+similarity.
 
 ---
 
 ## 6. Mobile Design System & CSS Variables
 
-The user interface uses a custom glassmorphism design system declared in [index.css](file:///c:/Users/User/.gemini/antigravity/scratch/nvidia-nim-showcase/src/index.css).
+The user interface uses a custom glassmorphism design system declared in [index.css](src/index.css).
 
-### Color Tokens & Theme Keys
+### Colour Tokens
+
+The accent is a violet nebula ramp. Each colour is declared twice — once as a
+hex value, once as bare `r, g, b` channels — so translucent washes can be
+written against the token instead of hard-coding the triple:
+
 ```css
 :root {
-  --bg-void: #0a0907;          /* deep space black background */
-  --bg-panel: #110f0c;         /* panel baseline */
-  --bg-clay: rgba(26, 23, 16, 0.4); /* translucent card color */
-  --border-subtle: rgba(255, 255, 255, 0.05);
-  --border-base: rgba(245, 169, 61, 0.12);
-  --border-active: rgba(245, 169, 61, 0.4);
-  
-  --amber-c: #f5a93d;          /* signature star color glow */
-  --accent-phosphor: #00ff87;  /* embedding search green accent */
+  --bg-void:     #030309;   --bg-void-rgb:     3, 3, 9;
+  --bg-panel:    #07071a;   --bg-panel-rgb:    7, 7, 26;
+  --bg-elevated: #0c0c22;   --bg-elevated-rgb: 12, 12, 34;
+
+  --nebula-deep: #5b21b6;   --nebula-deep-rgb:  91, 33, 182;
+  --nebula-core: #7c3aed;   --nebula-core-rgb: 124, 58, 237;
+  --nebula-glow: #a78bfa;   --nebula-glow-rgb: 167, 139, 250;
+  --nebula-pale: #ddd6fe;   --nebula-pale-rgb: 221, 214, 254;
 }
+
+/* Usage */
+border: 1px solid rgba(var(--nebula-core-rgb), 0.15);
 ```
+
+Accents each carry one meaning and appear nowhere else: `--accent-blue` for the
+person speaking, `--accent-violet` for generated code, `--accent-mint` for
+success and strong matches, `--accent-pending` for work in progress, and
+`--accent-coral` for errors and destructive actions.
+
+### Canvas colours are not CSS variables
+
+A canvas 2D context cannot resolve `var(--x)`. Assigning
+`ctx.fillStyle = 'var(--nebula-glow)'` is silently ignored and the *previous*
+fill colour stays in effect — a bug that produces plausible-looking output, so
+it survives review easily.
+
+Anything drawn to a canvas therefore reads its colours from
+[src/theme.js](src/theme.js), which mirrors the `:root` block. **Change both
+together.** `theme.js` also owns `CATEGORY_COLORS` (six distinguishable hues for
+the model clusters) and `SIMILARITY_SCALE` (the match-strength ramp), so the
+constellation map and the embedding map stay in step with the CSS.
+
+### Motion
+
+Ambient motion is atmosphere, not information. `prefers-reduced-motion` is
+honoured in CSS for transitions and animations, and separately in JS by the
+canvas render loops, which fall back to a single static frame or to direct
+placement without physics.
 
 ### Mobile Layout Media Overrides (`(max-width: 767px)`)
 - **Split Stack**: Flexible panes (`.arena-split`, `.codelab-split`, `.embeddings-split`, `.reasoning-split`) override to `flex-direction: column !important` on mobile.
@@ -254,3 +351,81 @@ Compile the minified assets bundle:
 npm run build
 ```
 This produces optimized production assets inside the `/dist` directory. Netlify picks up this folder automatically on deploy.
+
+---
+
+## 8. Model Availability & Health
+
+### The problem
+
+`GET /v1/models` returns the catalog NVIDIA publishes to everyone. Each entry
+carries `id`, `object`, `created` and `owned_by` — nothing about whether *your*
+key may call it. On the account this was built against, **54 of 102 listed
+models answer a real request with `404 Not found for account`**. Rendering that
+list straight into a dropdown is why choosing a model used to feel like a
+gamble.
+
+### The zero-token availability probe
+
+The gateway resolves the model *before* it validates the request body. That
+ordering is the whole trick: send a body that is guaranteed to fail validation,
+and the status code tells you which stage rejected it.
+
+```js
+POST /v1/chat/completions  { model, messages: [], max_tokens: 1 }
+
+400  "The 'messages' field cannot be empty"   -> the model resolved; you have it
+404  "Function '…': Not found for account"    -> you never had it
+```
+
+No inference runs, so **no tokens are spent**, and the whole catalog sweeps in
+about 20 seconds at a concurrency of five. Three other invalid-body variants
+were tried and rejected as unreliable: `max_tokens: 0` made one model run
+inference anyway, and both a bad `temperature` and a missing `messages` key
+produced false `404`s on a model that was actually entitled.
+
+### Why availability alone is not enough
+
+Measured against real inference calls:
+
+| Verdict | Accuracy | Conclusion |
+| --- | --- | --- |
+| `404` → blocked | 6/6 correct | Reliable. Nothing entitled is ever hidden. |
+| `400` → available | 10/14 worked | Entitled is not the same as serving. |
+| timeout | 2/6 later worked | **A timeout is a cold start, not a failure.** |
+
+That last row matters most. The app's own default chat model timed out on the
+probe and then answered fine in 11 seconds. Anything that treats a timeout as
+"down" hides working models — so timeouts are recorded as `cold` and retried
+with a longer budget, never written off.
+
+### Three signals, in increasing order of authority
+
+1. **Entitlement sweep** — free, whole-catalog, on load. Cached for 24 hours,
+   because entitlement is a property of the account rather than the moment.
+2. **Liveness probe** — a real one-token call, run when a picker opens or a
+   model is chosen. Costs a few tokens; cached for minutes, not hours.
+3. **Real traffic** — every message the user sends reports back. Free,
+   authoritative, and continuous. This is what makes the system self-correcting:
+   a model that starts failing is marked within one request, and one that
+   recovers is cleared the instant it answers.
+
+Repeated failures back off exponentially (30s, doubling, capped at 15 minutes)
+so a broken model is not polled forever, and any success resets the counter.
+
+### Self-healing in practice
+
+The workspaces feed only *usable* models into `useModelPicker`. Because that
+list is derived from live health rather than stored, a model that starts failing
+drops out of it and the selection moves to the next healthy one with no reset
+logic anywhere. Verified by planting a false healthy verdict on a model known to
+return `404`: it was offered, corrected on selection by the liveness probe,
+removed from the list, and the selection moved on — before any message could be
+sent.
+
+### Specialist models
+
+Safety classifiers, reward models, document parsers and translators are
+chat-shaped without being chat: they pass every availability check and then
+return a verdict or a score instead of a reply. They are categorised as
+`specialist` so they never appear in the chat picker.

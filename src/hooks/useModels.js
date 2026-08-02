@@ -1,106 +1,167 @@
-import { useState, useEffect } from 'react'
-import { fetchModels } from '../api/nvidia'
+/**
+ * @file useModels.js
+ * @description Loads the NIM model registry and enriches each entry with the
+ * category and context-window metadata the UI groups and sizes models by.
+ */
 
+import { useEffect, useState } from 'react'
+import { fetchModels, isAbortError } from '../api/nvidia'
+
+/**
+ * Sorts a model id into one of the app's six workspaces.
+ *
+ * Order matters. Embeddings are checked first because several embedding models
+ * carry names that would otherwise match the chat family list, and reasoning is
+ * checked before vision so a reasoning-capable VLM lands in the workspace that
+ * can actually show its chain of thought.
+ *
+ * @param {string} modelId - Fully-qualified model id, e.g. `meta/llama-3.1-8b-instruct`.
+ * @returns {'specialist'|'embedding'|'reasoning'|'vision'|'code'|'chat'|'other'} Category key.
+ */
 function categoriseModel(modelId) {
   const id = modelId.toLowerCase()
-  // 1. Embedding Models (must not match 'nemo' generally to avoid 'nemotron' chat models)
-  if (id.includes('embed') || id.includes('retrieval') || id.includes('nomic-embed')) return 'embedding'
-  
-  // 2. Reasoning / Thinking Models
-  if (id.includes('thinking') || id.includes('deepseek-r') || id.includes('o1') || id.includes('o3') || id.includes('qwq') || id.includes('reasoning') || id.includes('math')) return 'reasoning'
-  
-  // 3. Vision Models
-  if (id.includes('vision') || id.includes('vl') || id.includes('neva') || id.includes('paligemma') || id.includes('phi-3-v') || id.includes('phi-4-multimodal') || id.includes('pixtral') || id.includes('llava') || id.includes('internvl') || id.includes('fuyu')) return 'vision'
-  
-  // 4. Code Generation Models
-  if (id.includes('coder') || id.includes('codestral') || id.includes('starcoder') || id.includes('codellama') || id.includes('code-') || id.includes('code_')) return 'code'
-  
-  // 5. Chat / General Instruct Models (including Nemotron, Llama, Mistral, Mixtral, Gemma, Phi, Qwen, Yi, Jamba, Solar, Arctic, Falcon, Command, Granite, DBRX, Baichuan, Moonshot, Kimi, Writer, Upstage, 01-ai, Deepseek)
-  if (
-    id.includes('instruct') || 
-    id.includes('chat') || 
-    id.includes('llama') || 
-    id.includes('mistral') || 
-    id.includes('mixtral') || 
-    id.includes('gemma') || 
-    id.includes('qwen') || 
-    id.includes('nemotron') || 
-    id.includes('phi') || 
-    id.includes('yi') || 
-    id.includes('jamba') || 
-    id.includes('solar') || 
-    id.includes('arctic') || 
-    id.includes('falcon') || 
-    id.includes('command') || 
-    id.includes('granite') || 
-    id.includes('dbrx') || 
-    id.includes('baichuan') ||
-    id.includes('moonshot') ||
-    id.includes('kimi') ||
-    id.includes('writer') ||
-    id.includes('upstage') ||
-    id.includes('01-ai') ||
-    id.includes('deepseek')
-  ) {
+
+  const matches = (...needles) => needles.some((n) => id.includes(n))
+
+  // Checked first, because these are chat-shaped without being chat. A safety
+  // classifier answers "safe"/"unsafe", a reward model returns a score, a
+  // parser wants a document rather than a sentence. They pass every
+  // availability check and then disappoint, which is exactly the experience
+  // this categorisation exists to prevent.
+  if (matches(
+    'guard', 'safety', 'topic-control', 'content-safety', 'jailbreak',
+    'reward', 'parse', 'translate', 'ocr', 'detector', 'moderation',
+  )) {
+    return 'specialist'
+  }
+
+  if (matches('embed', 'retrieval', 'rerank')) return 'embedding'
+
+  if (matches('thinking', 'deepseek-r', 'reasoning', 'qwq', 'math', 'o1', 'o3')) {
+    return 'reasoning'
+  }
+
+  if (matches(
+    'vision', '-vl', 'vl-', 'neva', 'paligemma', 'phi-3-v', 'phi-4-multimodal',
+    'pixtral', 'llava', 'internvl', 'fuyu', 'florence', 'nvclip',
+  )) {
+    return 'vision'
+  }
+
+  if (matches('coder', 'codestral', 'starcoder', 'codellama', 'code-', 'code_')) {
+    return 'code'
+  }
+
+  if (matches(
+    'instruct', 'chat', 'llama', 'mistral', 'mixtral', 'gemma', 'qwen',
+    'nemotron', 'phi', 'jamba', 'solar', 'arctic', 'falcon', 'command',
+    'granite', 'dbrx', 'baichuan', 'moonshot', 'kimi', 'writer', 'upstage',
+    '01-ai', 'deepseek', 'yi-',
+  )) {
     return 'chat'
   }
-  
+
   return 'other'
 }
 
+/**
+ * Estimates a context window from the model id.
+ *
+ * The `/models` endpoint does not report context length, so this reads the
+ * conventions model publishers encode in their names. It drives node sizing on
+ * the constellation map and the badge on the inspector card — presentation
+ * only, never request parameters.
+ *
+ * @param {string} modelId - Fully-qualified model id.
+ * @returns {string} Human-readable window size, e.g. `128K`.
+ */
+function estimateContextWindow(modelId) {
+  const id = modelId.toLowerCase()
+
+  const explicit = id.match(/(\d+)k\b/)
+  if (explicit) return `${explicit[1]}K`
+
+  if (/llama-3\.[123]|llama-4|deepseek-v3|deepseek-r1|phi-4|nemotron/.test(id)) return '128K'
+  if (/mistral|mixtral|codestral|qwen2|qwen3/.test(id)) return '32K'
+  if (/gemma-2|gemma-3/.test(id)) return '16K'
+  return '8K'
+}
+
+/**
+ * Turns a raw registry entry into the shape the UI consumes.
+ * @param {{id: string}} model - Raw model record from the gateway.
+ * @returns {Object} Model with `providerName`, `category` and `contextWindow`.
+ */
+function decorate(model) {
+  return {
+    ...model,
+    providerName: model.id.split('/')[0].toUpperCase(),
+    category: categoriseModel(model.id),
+    contextWindow: estimateContextWindow(model.id),
+  }
+}
+
+/**
+ * Cache key for a given account. Keeps one catalog per key, not one global.
+ * The version suffix is bumped whenever `decorate` changes shape, so a cached
+ * catalog is never read back under a newer set of rules.
+ */
+const cacheKeyFor = (apiKey) => `nim_models_v2_${apiKey.slice(0, 10)}`
+
+/**
+ * Reads a previously cached catalog, if there is one.
+ * @param {string} apiKey - NVIDIA NIM API token.
+ * @returns {Array} Cached models, or an empty list.
+ */
+function readCache(apiKey) {
+  if (!apiKey) return []
+  try {
+    return JSON.parse(localStorage.getItem(cacheKeyFor(apiKey)) || '[]')
+  } catch {
+    return [] // Unreadable or stale-format cache — the network will refill it.
+  }
+}
+
+/**
+ * Fetches and decorates the model registry for the active key.
+ *
+ * A cached catalog is read synchronously on first render so a returning visitor
+ * never sees an empty sky, while a fresh request runs behind it. The cache is
+ * namespaced per key, so switching accounts cannot show the wrong catalog.
+ *
+ * @param {string} apiKey - NVIDIA NIM API token.
+ * @param {boolean} isReady - Whether a key has been resolved yet.
+ * @returns {{models: Array, isLoading: boolean, error: string|null}} Registry state.
+ */
 export function useModels(apiKey, isReady) {
-  const [models, setModels] = useState([])
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState(null)
+  const [state, setState] = useState(() => ({
+    models: readCache(apiKey),
+    isLoading: Boolean(apiKey),
+    error: null,
+  }))
 
   useEffect(() => {
     if (!isReady || !apiKey) return
+    const controller = new AbortController()
 
-    const loadModels = async () => {
-      const keyHash = apiKey.substring(0, 10)
-      const cacheKey = `nim_models_cache_${keyHash}`
-      
-      // Try cache first
-      const cached = localStorage.getItem(cacheKey)
-      if (cached) {
-        setModels(JSON.parse(cached))
-      }
+    fetchModels(apiKey, controller.signal)
+      .then((raw) => {
+        const models = raw.map(decorate)
+        setState({ models, isLoading: false, error: null })
+        try {
+          localStorage.setItem(cacheKeyFor(apiKey), JSON.stringify(models))
+        } catch {
+          // Over quota — the catalog still works for this session.
+        }
+      })
+      .catch((err) => {
+        if (isAbortError(err)) return
+        // Keep whatever was cached on screen; a stale catalog beats a blank one.
+        setState((prev) => ({ ...prev, isLoading: false, error: err.message }))
+      })
 
-      setIsLoading(true)
-      try {
-        const rawModels = await fetchModels(apiKey)
-        const processed = rawModels.map(m => {
-          const cat = categoriseModel(m.id)
-          const id = m.id.toLowerCase()
-          
-          let ctx = '8K'
-          if (id.includes('128k') || id.includes('llama-3.1') || id.includes('llama-3.2') || id.includes('llama-3.3') || id.includes('deepseek-v3') || id.includes('deepseek-r1') || id.includes('phi-4')) ctx = '128K'
-          else if (id.includes('64k')) ctx = '64K'
-          else if (id.includes('32k') || id.includes('mistral') || id.includes('mixtral') || id.includes('codestral')) ctx = '32K'
-          else if (id.includes('16k') || id.includes('gemma-2')) ctx = '16K'
-          else if (id.includes('8k') || id.includes('gemma')) ctx = '8K'
-          else if (id.includes('4k')) ctx = '4K'
-
-          return {
-            ...m,
-            providerName: m.id.split('/')[0].toUpperCase(),
-            category: cat,
-            contextWindow: ctx
-          }
-        })
-        setModels(processed)
-        localStorage.setItem(cacheKey, JSON.stringify(processed))
-        setError(null)
-      } catch (err) {
-        setError(err.message)
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
-    loadModels()
+    return () => controller.abort()
   }, [apiKey, isReady])
 
-  return { models, isLoading, error }
+  return state
 }
-
