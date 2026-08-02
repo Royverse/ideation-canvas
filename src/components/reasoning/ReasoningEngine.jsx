@@ -1,343 +1,313 @@
-import React, { useState, useEffect, useRef } from 'react'
+/**
+ * @file ReasoningEngine.jsx
+ * @description Reasoning workspace: the model's chain of thought on the left,
+ * its final answer on the right, both filling in as they stream.
+ */
+
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { streamReasoning } from '../../api/nvidia'
 import { useStream } from '../../hooks/useStream'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { useModelPicker } from '../../hooks/useModelPicker'
+import { useMediaQuery, usePrefersReducedMotion } from '../../hooks/useMediaQuery'
+import { ModelSelect } from '../shared/ModelSelect'
+import { MarkdownMessage } from '../shared/MarkdownMessage'
+import { explainError } from '../../lib/errors'
+import { PALETTE, CHANNELS, alpha } from '../../theme'
 
-// Animated waveform canvas
+/** Reasoning models with the clearest chains of thought, best first. */
+const PREFERRED = ['deepseek-r1', 'nemotron', 'qwq']
+
+/** Prompts that reward a visible chain of thought. */
+const OPENERS = [
+  { label: 'What is the last digit of 7^7^7^7?', hint: 'modular arithmetic' },
+  { label: 'Prove there are infinitely many primes', hint: 'classical proof' },
+  { label: 'Explain rigorously why 0.999… = 1', hint: 'real analysis' },
+  { label: "How many r's are in 'strawberry'?", hint: 'careful counting' },
+]
+
+/**
+ * An ambient waveform that reacts to whether the model is thinking.
+ *
+ * Colours come from the JS palette, not CSS variables: a canvas context cannot
+ * resolve `var(--x)` and silently keeps whatever colour was set before.
+ *
+ * @param {Object} props
+ * @param {boolean} props.active - Whether a generation is running.
+ */
 function ThinkingWave({ active }) {
   const canvasRef = useRef(null)
+  const reducedMotion = usePrefersReducedMotion()
+
+  // The render loop reads `active` through a ref so a state change adjusts the
+  // wave in place, rather than tearing down and restarting the animation.
+  const activeRef = useRef(active)
+  useEffect(() => { activeRef.current = active }, [active])
 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
-    let frame, phase = 0
+    let frame
+    let phase = 0
 
     const resize = () => {
-      const r = canvas.getBoundingClientRect()
-      canvas.width = r.width; canvas.height = r.height
+      const rect = canvas.getBoundingClientRect()
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = Math.max(1, Math.floor(rect.width * dpr))
+      canvas.height = Math.max(1, Math.floor(rect.height * dpr))
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     }
     resize()
-    window.addEventListener('resize', resize)
+
+    const observer = new ResizeObserver(resize)
+    observer.observe(canvas)
 
     const render = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      const speed = active ? 0.1 : 0.015
-      const amp   = active ? 12 : 2
-      const freq  = active ? 0.035 : 0.012
-      phase += speed
+      const isActive = activeRef.current
+      const width = canvas.clientWidth
+      const height = canvas.clientHeight
+      ctx.clearRect(0, 0, width, height)
 
-      const waves = [
-        { color: `rgba(200,112,42,${active ? 0.55 : 0.15})`, w: 2, off: 0 },
-        { color: `rgba(245,169,61,${active ? 0.3 : 0.07})`,  w: 1, off: 1.6 },
-        { color: `rgba(200,112,42,${active ? 0.2 : 0.04})`,  w: 1, off: 3.2 },
+      phase += isActive ? 0.1 : 0.015
+      const amplitude = isActive ? 12 : 2
+      const frequency = isActive ? 0.035 : 0.012
+
+      const layers = [
+        { color: alpha(CHANNELS.nebulaCore, isActive ? 0.55 : 0.15), width: 2, offset: 0 },
+        { color: alpha(CHANNELS.nebulaGlow, isActive ? 0.30 : 0.07), width: 1, offset: 1.6 },
+        { color: alpha(CHANNELS.nebulaCore, isActive ? 0.20 : 0.04), width: 1, offset: 3.2 },
       ]
 
-      for (const wave of waves) {
-        ctx.strokeStyle = wave.color
-        ctx.lineWidth   = wave.w
+      for (const layer of layers) {
+        ctx.strokeStyle = layer.color
+        ctx.lineWidth = layer.width
         ctx.beginPath()
-        for (let x = 0; x < canvas.width; x++) {
-          // Dampening function keeping wave edges bound to the left/right canvas boundaries
-          // Formula: Dampening = sin((x / Width) * PI)
-          const damp = Math.sin((x / canvas.width) * Math.PI)
-          // Wave equation: y = baseline + sin(x * frequency + phase + offset) * amplitude * dampening
-          const y = canvas.height / 2 + Math.sin(x * freq + phase + wave.off) * amp * damp
-          x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+        for (let x = 0; x < width; x++) {
+          // Damping pins both ends of the wave to the canvas edges, so it reads
+          // as a contained signal rather than a clipped one.
+          const damp = Math.sin((x / width) * Math.PI)
+          const y = height / 2 + Math.sin(x * frequency + phase + layer.offset) * amplitude * damp
+          if (x === 0) ctx.moveTo(x, y)
+          else ctx.lineTo(x, y)
         }
         ctx.stroke()
       }
-      frame = requestAnimationFrame(render)
+
+      // A single static frame still communicates "there is a signal here".
+      if (!reducedMotion) frame = requestAnimationFrame(render)
     }
     render()
-    return () => { cancelAnimationFrame(frame); window.removeEventListener('resize', resize) }
-  }, [active])
 
-  return <canvas ref={canvasRef} style={{ width: '100%', height: '32px', display: 'block' }} />
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [reducedMotion])
+
+  return <canvas ref={canvasRef} aria-hidden="true" style={{ width: '100%', height: '32px', display: 'block' }} />
 }
 
-const LOG_PREFIXES = [
-  'Initializing thought chain...',
-  'Analyzing query structure...',
-  'Evaluating logical options...',
-  'Resolving complex steps...',
-  'Drafting step solution...',
-  'Formulating final answer...',
-]
+/**
+ * Splits a chain of thought into readable steps on blank-line boundaries.
+ * @param {string} reasoning - Raw reasoning text.
+ * @returns {string[]} Non-empty paragraphs.
+ */
+function toSteps(reasoning) {
+  if (!reasoning) return []
+  return reasoning.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean)
+}
 
 export function ReasoningEngine({ apiKey, models, selectedModelId, setSelectedModelId }) {
-  const [input, setInput]               = useState('')
-  const [selectedModel, setSelectedModel] = useState('')
-  const { messages, isStreaming, error, send } = useStream(streamReasoning, apiKey)
-  const [elapsed, setElapsed]           = useState(0)
-  const timerRef                        = useRef(null)
-  const endRef                          = useRef(null)
-  const [isMobile, setIsMobile]         = useState(window.innerWidth < 768)
+  const [input, setInput] = useState('')
+
+  // Ticks up while the model works, then holds its last value — which is the
+  // total time the run took, so no separate "final duration" state is needed.
+  const [elapsed, setElapsed] = useState(0)
+  const startRef = useRef(0)
+
+  const isMobile = useMediaQuery('(max-width: 767px)')
+  const endRef = useRef(null)
+
+  const reasoningModels = useMemo(
+    () => models.filter((m) => m.category === 'reasoning'),
+    [models],
+  )
+
+  const { modelId, selectModel } = useModelPicker(reasoningModels, {
+    selectedModelId,
+    setSelectedModelId,
+    prefer: PREFERRED,
+  })
+
+  const { messages, isStreaming, error, send, stop } = useStream(streamReasoning, apiKey)
 
   useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 768)
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [])
-
-  const reasoningModels = models.filter(m => m.category === 'reasoning')
-
-  useEffect(() => {
-    if (selectedModelId && reasoningModels.find(m => m.id === selectedModelId)) {
-      setSelectedModel(selectedModelId)
-    } else if (reasoningModels.length > 0 && !selectedModel) {
-      setSelectedModel(reasoningModels[0].id)
-    }
-  }, [selectedModelId, reasoningModels, selectedModel])
-
-  const handleModelChange = e => { setSelectedModel(e.target.value); setSelectedModelId(e.target.value) }
-
-  useEffect(() => {
-    if (isStreaming) {
-      setElapsed(0)
-      const start = Date.now()
-      timerRef.current = setInterval(() => setElapsed((Date.now() - start) / 1000), 100)
-    } else {
-      clearInterval(timerRef.current)
-    }
-    return () => clearInterval(timerRef.current)
+    if (!isStreaming) return
+    startRef.current = performance.now()
+    const timer = setInterval(() => {
+      setElapsed((performance.now() - startRef.current) / 1000)
+    }, 100)
+    return () => clearInterval(timer)
   }, [isStreaming])
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
-  const handleSend = (preset = null) => {
-    const msg = preset || input
-    if (!msg.trim() || !selectedModel || isStreaming) return
-    if (!preset) setInput('')
-    send(selectedModel, msg, { max_tokens: 2048 })
+  const submit = useCallback((prompt) => {
+    if (!prompt.trim() || !modelId || isStreaming) return
+    send(modelId, prompt.trim(), { max_tokens: 2048 })
+  }, [modelId, isStreaming, send])
+
+  const handleSend = useCallback(() => {
+    const prompt = input
+    setInput('')
+    submit(prompt)
+  }, [input, submit])
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
   }
 
-  const handleKey = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }
-
-  const activeMsg = messages[messages.length - 1]
-  const isAI = activeMsg?.role === 'assistant'
-
-  const renderReasoning = (text) => {
-    if (!text) return null
-    return text.split('\n\n').filter(Boolean).map((p, idx) => (
-      <div key={idx} className="glass-card" style={{
-        padding: '14px 18px',
-        marginBottom: '12px',
-        background: 'rgba(200, 112, 42, 0.05)',
-        border: '1px solid rgba(200, 112, 42, 0.15)',
-        borderRadius: '16px',
-        boxShadow: 'var(--clay-shadow-light)',
-        transition: 'all 0.2s',
-      }}>
-        <div style={{
-          fontSize: '9.5px', fontFamily: "'JetBrains Mono', monospace",
-          color: 'var(--amber-c)', letterSpacing: '0.08em', marginBottom: '8px',
-          fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px',
-        }}>
-          <span style={{ width: '4px', height: '4px', borderRadius: '50%', background: 'var(--amber-c)', display: 'inline-block' }} />
-          [+{(idx * 1.85).toFixed(2)}s] {LOG_PREFIXES[idx] || 'INFERENTIAL EXPANSION'}
-        </div>
-        <div style={{ fontSize: '12.5px', color: 'var(--text-primary)', lineHeight: 1.6, whiteSpace: 'pre-wrap', fontFamily: "'Inter', sans-serif" }}>
-          {p}
-        </div>
-      </div>
-    ))
-  }
+  const latest = messages[messages.length - 1]
+  const latestIsReply = latest?.role === 'assistant'
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative', overflow: 'hidden' }}>
       <div className="dot-grid" />
-      <div className="ambient-blob" style={{ width: 500, height: 500, top: '-10%', left: '20%', background: 'radial-gradient(circle, rgba(200,112,42,0.06), transparent)' }} />
+      <div
+        className="ambient-blob"
+        style={{
+          width: 500, height: 500, top: '-10%', left: '20%',
+          background: `radial-gradient(circle, ${alpha(CHANNELS.nebulaCore, 0.06)}, transparent)`,
+        }}
+      />
 
-      {/* Top bar */}
       <div className="top-bar" style={{ zIndex: 2 }}>
-        <span className="cognitive-label" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9.5px', color: 'var(--text-dim)', letterSpacing: '0.08em' }}>COGNITIVE MODEL</span>
-        <select
-          className="field-input model-select-dropdown"
-          value={selectedModel}
-          onChange={handleModelChange}
-          style={{ padding: '6px 32px 6px 10px', fontSize: '11px', color: 'var(--amber-c)' }}
-        >
-          {reasoningModels.length === 0
-            ? <option>Loading models…</option>
-            : reasoningModels.map(m => <option key={m.id} value={m.id} style={{ background: 'var(--bg-panel)' }}>{m.id.split('/').pop()}</option>)
-          }
-        </select>
+        <ModelSelect label="Model" models={reasoningModels} value={modelId} onChange={selectModel} />
         <div style={{ flex: 1 }} />
-        <div style={{
-          fontFamily: "'JetBrains Mono', monospace", fontSize: '9px', fontWeight: 600,
-          letterSpacing: '0.1em', color: 'var(--amber-b)',
-          background: 'rgba(200,112,42,0.07)', border: '1px solid rgba(200,112,42,0.18)',
-          padding: '4px 10px', borderRadius: '12px',
-        }}>
-          ⊕ REASONING ONLINE
-        </div>
+        {isStreaming && (
+          <span className="working-badge">
+            <span className="status-dot status-dot-active" />
+            Thinking · {elapsed.toFixed(1)}s
+          </span>
+        )}
       </div>
 
-      {/* Empty state */}
       {messages.length === 0 ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '28px', padding: '40px', zIndex: 1 }}>
-          <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <div style={{
-              fontFamily: "'JetBrains Mono', monospace", fontSize: '10px', fontWeight: 600,
-              letterSpacing: '0.2em', background: 'var(--grad-main)',
-              WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text',
-            }}>
-              ⊕ SYNAPTIC CORE SYSTEM ⊕
-            </div>
-            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.7, maxWidth: '400px' }}>
-              Submit a logic, proof, or mathematics query to see the multi-step chain of thought unfold.
+          <div className="empty-state" style={{ margin: 0 }}>
+            <div className="empty-state-eyebrow">Reasoning</div>
+            <p className="empty-state-body">
+              Reasoning models work through a problem before answering. Ask one
+              something with steps and you will see the working on the left, the
+              conclusion on the right.
             </p>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', width: '100%', maxWidth: '640px' }}>
-            {[
-              { label: "What is the last digit of 7^7^7^7?",       icon: '🔢' },
-              { label: "Prove there are infinitely many primes",    icon: '📐' },
-              { label: "Explain rigorously why 0.999… = 1",         icon: '♾️' },
-              { label: "How many r's in 'strawberry'?",             icon: '🍓' },
-            ].map(p => (
+          <div className="reasoning-openers">
+            {OPENERS.map((opener) => (
               <button
-                key={p.label}
-                className="glass-card btn"
-                onClick={() => handleSend(p.label)}
-                style={{ padding: '16px 18px', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'center', fontSize: '12px', lineHeight: 1.4, height: 'auto' }}
-                onMouseOver={e => { e.currentTarget.style.borderColor = 'rgba(200,112,42,0.3)'; e.currentTarget.style.background = 'rgba(200,112,42,0.03)' }}
-                onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border-base)'; e.currentTarget.style.background = '' }}
+                key={opener.label}
+                type="button"
+                className="glass-card reasoning-opener"
+                onClick={() => submit(opener.label)}
+                disabled={!modelId || isStreaming}
               >
-                <span style={{ fontSize: '18px' }}>{p.icon}</span>
-                <span style={{ color: 'var(--text-primary)', fontFamily: "'Inter', sans-serif" }}>{p.label}</span>
+                <span className="reasoning-opener-label">{opener.label}</span>
+                <span className="reasoning-opener-hint">{opener.hint}</span>
               </button>
             ))}
           </div>
         </div>
       ) : (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', zIndex: 1 }}>
-          {/* Wave indicator */}
-          <div style={{ background: 'rgba(17,16,9,0.7)', backdropFilter: 'blur(8px)', padding: '2px 20px', borderBottom: '1px solid var(--border-subtle)' }}>
+          <div style={{ background: 'rgba(7, 7, 26, 0.7)', backdropFilter: 'blur(8px)', padding: '2px 20px', borderBottom: '1px solid var(--border-subtle)' }}>
             <ThinkingWave active={isStreaming} />
           </div>
 
           {error && (
-            <div className="error-box" style={{ margin: '16px 20px 0' }}>
-              <span style={{ fontSize: '14px' }}>⚠️</span>
+            <div className="error-box" style={{ margin: '16px 20px 0' }} role="alert">
+              <span aria-hidden="true" style={{ fontSize: '14px' }}>◈</span>
               <div>
-                <span className="error-box-title">REASONING ERROR</span>
-                <span className="error-box-body">
-                  {error.includes('Not found for account') || error.includes('404')
-                    ? 'This reasoning model is not available for your account tier. Please select a different model above.'
-                    : `We couldn't get a reasoning response. Details: ${error}`}
-                </span>
+                <span className="error-box-title">Reasoning failed</span>
+                <span className="error-box-body">{explainError(error)}</span>
               </div>
             </div>
           )}
 
-          {/* Split: chain of thought | final answer */}
           <div className="reasoning-split" style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-            {/* Left: Chain of thought */}
-            <div className="reasoning-chain-panel" style={{
-              flex: 1, borderRight: '1px solid var(--border-subtle)',
-              padding: '24px', overflowY: 'auto',
-              background: 'rgba(200, 112, 42, 0.01)',
-            }}>
-              <div style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                marginBottom: '18px',
-              }}>
-                <div style={{
-                  fontFamily: "'JetBrains Mono', monospace", fontSize: '9px', fontWeight: 600,
-                  letterSpacing: '0.15em', color: 'var(--amber-b)', display: 'flex', alignItems: 'center', gap: '8px',
-                }}>
-                  {isStreaming ? (
-                    <svg style={{ animation: 'spin-slow 2s linear infinite' }} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                      <path d="M12 2v20M17 5H7M19 12H5M17 19H7" strokeLinecap="round" />
-                    </svg>
-                  ) : (
-                    <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: 'var(--amber-c)', display: 'inline-block', boxShadow: '0 0 6px rgba(245, 169, 61, 0.6)' }} />
-                  )}
-                  THINKING PROCESS
-                </div>
+            {/* Chain of thought */}
+            <div
+              className="reasoning-chain-panel"
+              style={{ flex: 1, borderRight: '1px solid var(--border-subtle)', padding: '24px', overflowY: 'auto' }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+                <span className="field-caption">Working</span>
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9px', color: 'var(--text-dim)' }}>
                   {elapsed.toFixed(1)}s
                 </span>
               </div>
 
               {messages.map((msg, i) => msg.role === 'user' ? (
-                <div key={i} className="glass-card" style={{
-                  padding: '14px 18px',
-                  marginBottom: '14px',
-                  background: 'rgba(255, 255, 255, 0.02)',
-                  fontFamily: "'Inter', sans-serif", fontSize: '13px', color: 'var(--text-primary)',
-                  boxShadow: 'var(--clay-shadow-light)'
-                }}>
-                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '8.5px', color: 'var(--text-dim)', marginBottom: '5px', letterSpacing: '0.15em', fontWeight: 700 }}>YOU ›</div>
+                <div key={i} className="glass-card reasoning-question">
+                  <div className="field-caption" style={{ marginBottom: '5px' }}>You asked</div>
                   {msg.content}
                 </div>
               ) : (
-                <React.Fragment key={i}>
-                  {renderReasoning(msg.reasoning)}
+                <Fragment key={i}>
+                  {toSteps(msg.reasoning).map((step, index) => (
+                    <div key={index} className="glass-card reasoning-step">
+                      <div className="reasoning-step-index">Step {index + 1}</div>
+                      <div className="reasoning-step-body">{step}</div>
+                    </div>
+                  ))}
                   {msg.isStreaming && !msg.reasoning && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', fontFamily: "'Inter', sans-serif", color: 'var(--text-secondary)', padding: '8px 12px' }}>
-                      <span className="terminal-cursor" style={{ width: '5px', height: '11px', background: 'var(--amber-b)' }} />
-                      AI is thinking...
+                    <div className="reasoning-waiting">
+                      <span className="terminal-cursor" style={{ width: '5px', height: '11px', background: PALETTE.nebulaCore }} />
+                      Reading the question…
                     </div>
                   )}
-                </React.Fragment>
+                  {!msg.isStreaming && !msg.reasoning && (
+                    <div className="reasoning-waiting">
+                      This model answered directly, without exposing its working.
+                    </div>
+                  )}
+                </Fragment>
               ))}
+              <div ref={endRef} />
             </div>
 
-            {/* Right: Final answer */}
-            <div className="reasoning-answer-panel" style={{ flex: 1, padding: '24px', overflowY: 'auto', background: 'rgba(12, 10, 8, 0.1)', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9px', fontWeight: 600, letterSpacing: '0.15em', color: 'var(--text-dim)' }}>
-                ANSWER
-              </div>
+            {/* Answer */}
+            <div
+              className="reasoning-answer-panel"
+              style={{ flex: 1, padding: '24px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}
+            >
+              <span className="field-caption">Answer</span>
 
-              {isAI && (
+              {latestIsReply && (
                 <>
-                  {!activeMsg.isStreaming && activeMsg.reasoning && (
-                    <div style={{
-                      display: 'inline-flex', alignSelf: 'flex-start',
-                      fontFamily: "'JetBrains Mono', monospace", fontSize: '9px', fontWeight: 700,
-                      color: 'var(--amber-c)', background: 'rgba(200, 112, 42, 0.08)',
-                      border: '1px solid rgba(200, 112, 42, 0.2)', padding: '5px 12px', borderRadius: '12px',
-                      boxShadow: 'var(--clay-shadow-btn)'
-                    }}>
-                      Reasoned for {elapsed.toFixed(1)}s ({activeMsg.reasoning.split(/\s+/).length} words)
-                    </div>
+                  {!latest.isStreaming && latest.reasoning && (
+                    <span className="reasoning-summary">
+                      Thought for {elapsed.toFixed(1)}s
+                      {' · '}
+                      {toSteps(latest.reasoning).length === 1
+                        ? '1 step'
+                        : `${toSteps(latest.reasoning).length} steps`}
+                    </span>
                   )}
 
-                  <div className="glass-card" style={{
-                    padding: '22px 24px',
-                    fontFamily: "'Inter', sans-serif", fontSize: '14px', lineHeight: 1.8, color: 'var(--text-primary)',
-                    boxShadow: 'var(--clay-shadow-dark)',
-                    background: 'rgba(26, 23, 16, 0.4)'
-                  }}>
-                    <div className="md-content">
-                      <Markdown remarkPlugins={[remarkGfm]} components={{
-                        code({ node, inline, className, children, ...props }) {
-                          const match = /language-(\w+)/.exec(className || '')
-                          return !inline && match ? (
-                            <SyntaxHighlighter {...props} children={String(children).replace(/\n$/, '')} style={vscDarkPlus} language={match[1]} PreTag="div"
-                              customStyle={{ background: 'rgba(12,10,8,0.8)', borderRadius: '6px', fontSize: '12px', margin: '12px 0', border: '1px solid var(--border-base)', padding: '12px 16px' }}
-                            />
-                          ) : (
-                            <code style={{ background: 'rgba(200,112,42,0.08)', border: '1px solid rgba(200,112,42,0.15)', padding: '1px 5px', borderRadius: '4px', fontFamily: "'JetBrains Mono', monospace", fontSize: '12px', color: 'var(--amber-c)' }}>
-                              {children}
-                            </code>
-                          )
-                        }
-                      }}>
-                        {activeMsg.content || ''}
-                      </Markdown>
-                    </div>
-                    {activeMsg.isStreaming && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px' }}>
-                        <span className="terminal-cursor" style={{ background: 'var(--amber-c)' }} />
-                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9.5px', color: 'var(--amber-b)', letterSpacing: '0.08em' }}>Streaming answer...</span>
-                      </div>
+                  <div className="glass-card" style={{ padding: '22px 24px', fontSize: '14px', lineHeight: 1.8, color: 'var(--text-primary)' }}>
+                    {latest.isStreaming && !latest.content ? (
+                      <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
+                        Waiting for the conclusion…
+                      </span>
+                    ) : (
+                      <MarkdownMessage>{latest.content}</MarkdownMessage>
                     )}
+                    {latest.isStreaming && latest.content && <span className="terminal-cursor" />}
                   </div>
                 </>
               )}
@@ -346,31 +316,36 @@ export function ReasoningEngine({ apiKey, models, selectedModelId, setSelectedMo
         </div>
       )}
 
-      {/* Input */}
       <div className="input-row" style={{ zIndex: 2 }}>
         <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', maxWidth: '900px', margin: '0 auto', width: '100%' }}>
           <div style={{ flex: 1, position: 'relative' }}>
-            <span style={{ position: 'absolute', left: '13px', top: '12px', fontFamily: "'JetBrains Mono', monospace", fontSize: '13px', color: 'var(--text-dim)', pointerEvents: 'none' }}>››</span>
+            <span className="composer-caret" aria-hidden="true">››</span>
             <textarea
               className="field-input"
               value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKey}
-              placeholder={isMobile ? "Ask a question..." : "Ask a logical or mathematical question... (Enter to send)"}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              aria-label="Question"
+              placeholder={isMobile ? 'Ask a question…' : 'Ask something with steps — Enter to send'}
               rows={Math.min(5, (input.match(/\n/g) || []).length + 1)}
               style={{ paddingLeft: '34px' }}
             />
           </div>
-          <button
-            className={`btn ${input.trim() && !isStreaming ? 'btn-primary' : ''}`}
-            onClick={() => handleSend()}
-            disabled={!input.trim() || isStreaming}
-            style={{ height: '44px', padding: '0 22px', flexShrink: 0 }}
-          >
-            {isStreaming ? (
-              <><span className="status-dot status-dot-active" /> THINKING</>
-            ) : 'THINK ›'}
-          </button>
+          {isStreaming ? (
+            <button type="button" className="btn btn-danger" onClick={stop} style={{ height: '44px', padding: '0 22px', flexShrink: 0 }}>
+              <span className="stop-glyph" aria-hidden="true" /> Stop
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={`btn ${input.trim() ? 'btn-primary' : ''}`}
+              onClick={handleSend}
+              disabled={!input.trim() || !modelId}
+              style={{ height: '44px', padding: '0 22px', flexShrink: 0 }}
+            >
+              Think ›
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -1,283 +1,215 @@
-import React, { useState, useEffect, useRef } from 'react'
+/**
+ * @file ChatArena.jsx
+ * @description Conversational workspace: a settings rail, a transcript, and a
+ * composer, with live latency and throughput readings for the active model.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { streamChat } from '../../api/nvidia'
 import { useStream } from '../../hooks/useStream'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { useModelPicker } from '../../hooks/useModelPicker'
+import { useMediaQuery } from '../../hooks/useMediaQuery'
+import { ModelSelect } from '../shared/ModelSelect'
+import { useStreamTelemetry } from '../../hooks/useStreamTelemetry'
+import { MarkdownMessage } from '../shared/MarkdownMessage'
+import { StreamTelemetry } from '../shared/StreamTelemetry'
+import { copyText } from '../../lib/clipboard'
+import { getProvider } from '../../lib/providers'
+import { explainError } from '../../lib/errors'
+import { PALETTE } from '../../theme'
 
-function getProvider(modelId) {
-  const id = modelId.toLowerCase()
-  if (id.includes('nvidia') || id.includes('nemotron')) return { name: 'NVIDIA',    color: '#5ab87a' }
-  if (id.includes('meta')   || id.includes('llama'))    return { name: 'META',      color: '#4fa3d4' }
-  if (id.includes('mistral') || id.includes('codestral')) return { name: 'MISTRAL', color: '#e0884080' }
-  if (id.includes('microsoft') || id.includes('phi'))   return { name: 'MSFT',      color: '#4fa3d4' }
-  if (id.includes('google') || id.includes('gemma'))    return { name: 'GOOGLE',    color: '#c8702a' }
-  if (id.includes('qwen'))                              return { name: 'QWEN',      color: '#8b6fd4' }
-  if (id.includes('deepseek'))                          return { name: 'DEEPSEEK',  color: '#4fa3d4' }
-  return { name: 'MODEL', color: 'var(--text-secondary)' }
-}
+/** Model families that make the best default for open-ended chat, best first. */
+const PREFERRED = ['llama-3.3', 'llama-3.1', 'nemotron']
 
-function CodeBlock({ inline, className, children, ...props }) {
-  const match = /language-(\w+)/.exec(className || '')
-  const [copied, setCopied] = React.useState(false)
-  const language = match ? match[1] : 'plaintext'
-  const codeString = String(children).replace(/\n$/, '')
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(codeString)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-
-  if (!inline && match) {
-    return (
-      <div style={{ margin: '12px 0', borderRadius: '8px', overflow: 'hidden', border: '1px solid var(--border-base)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)', padding: '6px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '10px', color: 'var(--text-dim)', textTransform: 'uppercase' }}>{language}</span>
-          <button onClick={handleCopy} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace", fontSize: '9px', color: copied ? 'var(--accent-green)' : 'var(--text-dim)', transition: 'color 0.2s' }}>
-            {copied ? '✓ COPIED' : '⧉ COPY'}
-          </button>
-        </div>
-        <SyntaxHighlighter
-          {...props}
-          children={codeString}
-          style={vscDarkPlus}
-          language={language}
-          PreTag="div"
-          customStyle={{ background: 'rgba(12,10,8,0.8)', margin: 0, padding: '12px 16px', fontSize: '11.5px' }}
-        />
-      </div>
-    )
-  }
-
-  return (
-    <code {...props} className={`md-content ${className || ''}`} style={{
-      background: 'rgba(200,112,42,0.08)', border: '1px solid rgba(200,112,42,0.15)',
-      padding: '1px 5px', borderRadius: '4px', fontFamily: "'JetBrains Mono', monospace",
-      fontSize: '11.5px', color: 'var(--amber-c)',
-    }}>
-      {children}
-    </code>
-  )
-}
-
-function mdComponents() {
-  return { code: CodeBlock }
-}
+/** First moves offered on the empty transcript. */
+const OPENERS = [
+  'Explain what a NIM container actually packages',
+  'Draft release notes from a list of commits',
+  'Compare TensorRT-LLM and vLLM for serving',
+]
 
 export function ChatArena({ apiKey, models, selectedModelId, setSelectedModelId }) {
-  const [input, setInput]           = useState('')
-  const [selectedModel, setSelectedModel] = useState('')
-  const [temperature, setTemperature]   = useState(0.7)
-  const [maxTokens, setMaxTokens]       = useState(1024)
+  const [input, setInput] = useState('')
+  const [temperature, setTemperature] = useState(0.7)
+  const [maxTokens, setMaxTokens] = useState(1024)
   const [systemPrompt, setSystemPrompt] = useState('You are a helpful, precise assistant.')
-  const [showParams, setShowParams]     = useState(true)
-  const [copiedId, setCopiedId]         = useState(null)
+  const [showParams, setShowParams] = useState(true)
+  const [copiedIndex, setCopiedIndex] = useState(null)
 
+  const isMobile = useMediaQuery('(max-width: 767px)')
   const containerRef = useRef(null)
-  const [paramsWidth, setParamsWidth] = useState(240)
+  const endRef = useRef(null)
+
+  // The rail's width on desktop, its height on mobile. Stored alongside the
+  // layout it was set in, so crossing the breakpoint falls back to that
+  // layout's default rather than carrying a width over into a height.
+  const [rail, setRail] = useState({ mode: null, size: 0 })
   const [isDragging, setIsDragging] = useState(false)
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
+  const mode = isMobile ? 'mobile' : 'desktop'
+  const railSize = rail.mode === mode ? rail.size : (isMobile ? 180 : 240)
 
-  useEffect(() => {
-    const handleResize = () => {
-      const mobile = window.innerWidth < 768
-      setIsMobile(mobile)
-      // reset size defaults depending on orientation
-      setParamsWidth(mobile ? 180 : 240)
-    }
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [])
+  const chatModels = useMemo(() => models.filter((m) => m.category === 'chat'), [models])
 
-  const handlePointerDown = (e) => {
-    setIsDragging(true)
-    e.preventDefault()
-  }
+  const { modelId, selectModel } = useModelPicker(chatModels, {
+    selectedModelId,
+    setSelectedModelId,
+    prefer: PREFERRED,
+  })
 
+  const { messages, isStreaming, error, send, stop, clearMessages } = useStream(streamChat, apiKey)
+  const telemetry = useStreamTelemetry(messages, isStreaming)
+
+  // Drag-to-resize the rail. The listeners live on the window so the pointer
+  // can leave the thin handle mid-drag without dropping the gesture.
   useEffect(() => {
     if (!isDragging) return
 
-    const handlePointerMove = (e) => {
-      if (!containerRef.current) return
-      const rect = containerRef.current.getBoundingClientRect()
-      if (isMobile) {
-        const topHeightPx = e.clientY - rect.top
-        const newHeight = Math.max(120, Math.min(rect.height - 180, topHeightPx))
-        setParamsWidth(newHeight)
-      } else {
-        const leftWidthPx = e.clientX - rect.left
-        const newWidth = Math.max(180, Math.min(Math.min(480, rect.width - 320), leftWidthPx))
-        setParamsWidth(newWidth)
-      }
+    const handleMove = (e) => {
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const size = isMobile
+        ? Math.max(120, Math.min(rect.height - 180, e.clientY - rect.top))
+        : Math.max(180, Math.min(Math.min(480, rect.width - 320), e.clientX - rect.left))
+      setRail({ mode: isMobile ? 'mobile' : 'desktop', size })
     }
+    const handleUp = () => setIsDragging(false)
 
-    const handlePointerUp = () => {
-      setIsDragging(false)
-    }
-
-    window.addEventListener('pointermove', handlePointerMove)
-    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleUp)
     return () => {
-      window.removeEventListener('pointermove', handlePointerMove)
-      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleUp)
     }
   }, [isDragging, isMobile])
 
-  const { messages, isStreaming, error, send, clearMessages } = useStream(streamChat, apiKey)
-  const endRef = useRef(null)
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
-  const handleCopyMessage = (text, idx) => {
-    navigator.clipboard.writeText(text)
-    setCopiedId(idx)
-    setTimeout(() => setCopiedId(null), 2000)
+  const submit = useCallback((prompt) => {
+    if (!prompt.trim() || !modelId || isStreaming) return
+    send(modelId, prompt.trim(), {
+      temperature,
+      max_tokens: maxTokens,
+      systemPrompt: systemPrompt.trim() || undefined,
+    })
+  }, [modelId, isStreaming, send, temperature, maxTokens, systemPrompt])
+
+  const handleSend = useCallback(() => {
+    const prompt = input
+    setInput('')
+    submit(prompt)
+  }, [input, submit])
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
   }
 
-  // Telemetry
-  const [latency, setLatency]   = useState(0)
-  const [tps, setTps]           = useState(0)
-  const startRef                = useRef(null)
-  const firstTokenRef           = useRef(null)
-
-  const chatModels = models.filter(m => m.category === 'chat')
-
-  useEffect(() => {
-    if (selectedModelId && chatModels.find(m => m.id === selectedModelId)) {
-      setSelectedModel(selectedModelId)
-    } else if (chatModels.length > 0 && !selectedModel) {
-      setSelectedModel(chatModels[0].id)
+  const handleCopyMessage = async (text, index) => {
+    if (await copyText(text)) {
+      setCopiedIndex(index)
+      setTimeout(() => setCopiedIndex(null), 2000)
     }
-  }, [selectedModelId, chatModels, selectedModel])
-
-  const handleModelChange = e => {
-    setSelectedModel(e.target.value)
-    setSelectedModelId(e.target.value)
   }
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
-
-  useEffect(() => {
-    if (isStreaming) {
-      startRef.current = Date.now()
-      firstTokenRef.current = null
-      setLatency(0); setTps(0)
-    } else if (startRef.current) {
-      const t = (Date.now() - startRef.current) / 1000
-      const chars = messages[messages.length - 1]?.content?.length || 0
-      const approx = Math.max(1, Math.round(chars / 4))
-      if (t > 0) setTps(approx / t)
-    }
-  }, [isStreaming])
-
-  useEffect(() => {
-    if (isStreaming && messages.length > 0 && startRef.current) {
-      const last = messages[messages.length - 1]
-      if (last?.role === 'assistant' && last.content.length > 0 && !firstTokenRef.current) {
-        firstTokenRef.current = Date.now()
-        setLatency(firstTokenRef.current - startRef.current)
-      }
-    }
-  }, [messages, isStreaming])
-
-  const handleSend = () => {
-    if (!input.trim() || !selectedModel || isStreaming) return
-    const msg = input; setInput('')
-    send(selectedModel, msg, { temperature, max_tokens: maxTokens, systemPrompt: systemPrompt.trim() || undefined })
-  }
-
-  const handleKey = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }
-
-  const provider = selectedModel ? getProvider(selectedModel) : null
-  const totalWords = messages.reduce((a, m) => a + (m.content?.split(/\s+/).length || 0), 0)
+  const provider = getProvider(modelId)
+  const modelName = modelId ? modelId.split('/').pop().toUpperCase() : 'MODEL'
+  const totalWords = messages.reduce(
+    (sum, m) => sum + (m.content ? m.content.trim().split(/\s+/).filter(Boolean).length : 0),
+    0,
+  )
 
   return (
-    <div ref={containerRef} className="arena-split" style={{ display: 'flex', height: '100%', overflow: 'hidden', position: 'relative' }}>
-      {/* Subtle ambient bg */}
+    <div
+      ref={containerRef}
+      className="arena-split"
+      style={{ display: 'flex', height: '100%', overflow: 'hidden', position: 'relative' }}
+    >
       <div className="dot-grid" />
-      <div className="ambient-blob" style={{ width: 400, height: 400, top: '-5%', right: '5%', background: 'radial-gradient(circle, var(--amber-a), transparent)' }} />
+      <div
+        className="ambient-blob"
+        style={{
+          width: 400, height: 400, top: '-5%', right: '5%',
+          background: `radial-gradient(circle, ${PALETTE.nebulaDeep}, transparent)`,
+        }}
+      />
 
-      {/* ── PARAMS PANEL ────────────────────────────────────────────── */}
+      {/* ── SETTINGS RAIL ───────────────────────────────────────────────── */}
       {showParams && (
-        <div className="params-panel-chat" style={{
-          width: isMobile ? '100%' : `${paramsWidth}px`,
-          height: isMobile ? `${paramsWidth}px` : '100%',
-          display: 'flex',
-          flexDirection: 'column',
-          flexShrink: 0,
-          background: 'rgba(17, 16, 9, 0.6)',
-          backdropFilter: 'blur(20px)',
-          WebkitBackdropFilter: 'blur(20px)',
-          zIndex: 2,
-          overflow: 'hidden'
-        }}>
+        <div
+          className="params-panel-chat"
+          style={{
+            width: isMobile ? '100%' : `${railSize}px`,
+            height: isMobile ? `${railSize}px` : '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            flexShrink: 0,
+            background: 'rgba(7, 7, 26, 0.6)',
+            backdropFilter: 'blur(20px)',
+            WebkitBackdropFilter: 'blur(20px)',
+            zIndex: 2,
+            overflow: 'hidden',
+          }}
+        >
           <div style={{ padding: '16px 18px 12px', borderBottom: '1px solid var(--border-subtle)', flexShrink: 0 }}>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9px', fontWeight: 600, letterSpacing: '0.14em', color: 'var(--text-dim)' }}>
-              CHAT SETTINGS
-            </div>
+            <span className="field-caption">Chat settings</span>
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', padding: '18px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            {/* System Prompt */}
             <div>
-              <label className="field-label">Instructions (System Prompt)</label>
+              <label className="field-label" htmlFor="chat-system-prompt">Instructions</label>
               <textarea
+                id="chat-system-prompt"
                 className="field-input"
                 value={systemPrompt}
-                onChange={e => setSystemPrompt(e.target.value)}
+                onChange={(e) => setSystemPrompt(e.target.value)}
                 rows={isMobile ? 2 : 4}
-                placeholder="Give the AI a role or guidelines..."
+                placeholder="Give the model a role or a set of guidelines…"
               />
-              <span style={{ fontSize: '10px', color: 'var(--text-dim)', display: 'block', marginTop: '4px', lineHeight: 1.3 }}>
-                Guides the AI's behavior, personality, and expertise.
-              </span>
+              <span className="field-hint">Shapes how the model answers, for the whole conversation.</span>
             </div>
 
-            {/* Temperature */}
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <label className="field-label" style={{ marginBottom: 0 }}>Creativity (Temperature)</label>
-                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '10px', color: 'var(--amber-c)', fontWeight: 600 }}>{temperature.toFixed(2)}</span>
+                <label className="field-label" htmlFor="chat-temperature" style={{ marginBottom: 0 }}>Creativity</label>
+                <span className="field-value">{temperature.toFixed(2)}</span>
               </div>
-              <input type="range" min="0" max="1.5" step="0.05" value={temperature} onChange={e => setTemperature(parseFloat(e.target.value))} />
-              <span style={{ fontSize: '10px', color: 'var(--text-dim)', display: 'block', marginTop: '4px', lineHeight: 1.3 }}>
-                Higher values make responses more creative but less predictable.
-              </span>
+              <input
+                id="chat-temperature"
+                type="range" min="0" max="1.5" step="0.05"
+                value={temperature}
+                onChange={(e) => setTemperature(parseFloat(e.target.value))}
+              />
+              <span className="field-hint">Higher values wander further from the obvious answer.</span>
             </div>
 
-            {/* Max tokens */}
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <label className="field-label" style={{ marginBottom: 0 }}>Max Length (Tokens)</label>
-                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '10px', color: 'var(--amber-c)', fontWeight: 600 }}>{maxTokens}</span>
+                <label className="field-label" htmlFor="chat-max-tokens" style={{ marginBottom: 0 }}>Reply length</label>
+                <span className="field-value">{maxTokens} tokens</span>
               </div>
-              <input type="range" min="128" max="4096" step="128" value={maxTokens} onChange={e => setMaxTokens(parseInt(e.target.value))} />
-              <span style={{ fontSize: '10px', color: 'var(--text-dim)', display: 'block', marginTop: '4px', lineHeight: 1.3 }}>
-                Limits the maximum length of the AI's response.
-              </span>
+              <input
+                id="chat-max-tokens"
+                type="range" min="128" max="4096" step="128"
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(parseInt(e.target.value, 10))}
+              />
+              <span className="field-hint">Generation stops here, even mid-sentence.</span>
             </div>
 
-            {/* Telemetry */}
             <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '18px' }}>
-              <div className="field-label" style={{ marginBottom: '12px' }}>Performance (Telemetry)</div>
-              <div className="glass-card" style={{ padding: '14px', background: 'rgba(12, 10, 8, 0.45)' }}>
+              <div className="field-label" style={{ marginBottom: '12px' }}>Performance</div>
+              <div className="glass-card" style={{ padding: '14px', background: 'rgba(3, 3, 9, 0.45)' }}>
+                <StreamTelemetry {...telemetry} />
                 <div className="tele-chip">
-                  <span>Response Time</span>
-                  <span className="tele-val">{latency > 0 ? `${latency}ms` : '—'}</span>
-                </div>
-                <div className="tele-chip">
-                  <span>Speed</span>
-                  <span className="tele-val">{tps > 0 ? `${tps.toFixed(1)} tokens/sec` : '—'}</span>
-                </div>
-                <div className="progress-track" style={{ height: '3px', borderRadius: '4px' }}>
-                  <div className="progress-fill" style={{ width: tps > 0 ? `${Math.min(100, (tps / 120) * 100)}%` : '0%', borderRadius: '4px' }} />
-                </div>
-                <div className="tele-chip" style={{ marginTop: '8px' }}>
-                  <span>Word Count</span>
+                  <span>Words</span>
                   <span className="tele-val">{totalWords}</span>
                 </div>
                 <div className="tele-chip">
-                  <span>Chat Turns</span>
+                  <span>Turns</span>
                   <span className="tele-val">{Math.floor(messages.length / 2)}</span>
                 </div>
               </div>
@@ -287,135 +219,138 @@ export function ChatArena({ apiKey, models, selectedModelId, setSelectedModelId 
       )}
 
       {showParams && (
-        isMobile ? (
-          <div className={`resizer-v${isDragging ? ' dragging' : ''}`} onPointerDown={handlePointerDown} />
-        ) : (
-          <div className={`resizer-h${isDragging ? ' dragging' : ''}`} onPointerDown={handlePointerDown} />
-        )
+        <div
+          className={`${isMobile ? 'resizer-v' : 'resizer-h'}${isDragging ? ' dragging' : ''}`}
+          onPointerDown={(e) => { setIsDragging(true); e.preventDefault() }}
+          role="separator"
+          aria-orientation={isMobile ? 'horizontal' : 'vertical'}
+          aria-label="Resize settings panel"
+        />
       )}
 
-      {/* ── MAIN PANEL ──────────────────────────────────────────────── */}
+      {/* ── TRANSCRIPT ──────────────────────────────────────────────────── */}
       <div className="chat-main-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', zIndex: 1 }}>
-
-        {/* Top bar */}
         <div className="top-bar">
-          <button className="btn" onClick={() => setShowParams(!showParams)} style={{ padding: '6px 12px', fontSize: '10px' }}>
-            {showParams ? '◀' : '▶'} PARAMS
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setShowParams(!showParams)}
+            aria-expanded={showParams}
+            style={{ padding: '6px 12px', fontSize: '10px' }}
+          >
+            {showParams ? '◀' : '▶'} Settings
           </button>
 
-          <div style={{ width: '1px', height: '16px', background: 'var(--border-subtle)' }} />
+          <div className="bar-divider" />
 
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '9.5px', letterSpacing: '0.08em', color: 'var(--text-dim)' }}>
-            MODEL
-          </span>
-          <select
-            className="field-input model-select-dropdown"
-            value={selectedModel}
-            onChange={handleModelChange}
-            style={{ padding: '6px 32px 6px 10px', fontSize: '11px', color: 'var(--amber-c)' }}
-          >
-            {chatModels.length === 0
-              ? <option>Loading models…</option>
-              : chatModels.map(m => <option key={m.id} value={m.id} style={{ background: 'var(--bg-panel)' }}>{m.id.split('/').pop()}</option>)
-            }
-          </select>
+          <ModelSelect label="Model" models={chatModels} value={modelId} onChange={selectModel} />
 
-          {provider && (
-            <span className="provider-badge" style={{ color: provider.color, background: `${provider.color}14`, borderColor: `${provider.color}22` }}>
+          {modelId && (
+            <span
+              className="provider-badge"
+              style={{ color: provider.color, background: `${provider.color}14`, borderColor: `${provider.color}22` }}
+            >
               {provider.name}
             </span>
           )}
 
           <div style={{ flex: 1 }} />
 
-          <button className="btn btn-danger" onClick={clearMessages} style={{ padding: '6px 14px', fontSize: '10px' }}>
-            ✕ RESET
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={clearMessages}
+            disabled={messages.length === 0}
+            style={{ padding: '6px 14px', fontSize: '10px' }}
+          >
+            Clear chat
           </button>
         </div>
 
-        {/* Messages */}
-        <div style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '28px 36px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '24px',
-        }}>
+        <div
+          style={{
+            flex: 1, overflowY: 'auto', padding: '28px 36px',
+            display: 'flex', flexDirection: 'column', gap: '24px',
+          }}
+        >
           {error && (
-            <div className="error-box fade-up">
-              <span style={{ fontSize: '14px', marginTop: '1px' }}>⚠️</span>
+            <div className="error-box fade-up" role="alert">
+              <span aria-hidden="true" style={{ fontSize: '14px', marginTop: '1px' }}>◈</span>
               <div>
-                <span className="error-box-title">CONNECTION ERROR</span>
-                <span className="error-box-body">
-                  {error.includes('Not found for account') || error.includes('404')
-                    ? 'This model is not available for your account tier. Free trial accounts get access to standard models like Llama, Gemma, and Mistral. Please select a different model above.'
-                    : `We couldn't reach the model. Details: ${error}`}
-                </span>
+                <span className="error-box-title">The model did not answer</span>
+                <span className="error-box-body">{explainError(error)}</span>
               </div>
             </div>
           )}
 
           {messages.length === 0 && (
-            <div className="fade-up" style={{ margin: 'auto', maxWidth: '440px', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div style={{
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: '11px',
-                fontWeight: 600,
-                letterSpacing: '0.2em',
-                background: 'var(--grad-main)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                backgroundClip: 'text',
-              }}>
-                ◈ MILKYWAY.AI ACTIVE ◈
-              </div>
-              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.7 }}>
-                A deep-space playground to query, benchmark, and converse with NVIDIA NIM models across the galaxy.
+            <div className="fade-up empty-state">
+              <div className="empty-state-eyebrow">Chat arena</div>
+              <p className="empty-state-body">
+                Pick a model above and ask it something. The settings rail changes
+                how it answers — instructions set its role, creativity sets how far
+                it strays from the obvious.
               </p>
+              <div className="empty-state-chips">
+                {OPENERS.map((opener) => (
+                  <button
+                    key={opener}
+                    type="button"
+                    className="btn"
+                    onClick={() => submit(opener)}
+                    disabled={!modelId || isStreaming}
+                    style={{ textAlign: 'left', fontSize: '10.5px', padding: '9px 13px' }}
+                  >
+                    {opener}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
           {messages.map((msg, i) => (
-            <div key={i} className={`stream-in ${msg.role === 'user' ? 'msg-user' : 'msg-ai'}`} style={{ width: msg.role === 'user' ? undefined : '100%', display: 'flex', flexDirection: 'column' }}>
-              <div className="msg-meta" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: msg.role === 'user' ? 'var(--accent-blue)' : 'var(--amber-b)', width: '100%' }}>
-                <div>
-                  {msg.role === 'user'
-                    ? 'YOU ›'
-                    : `${selectedModel.split('/').pop().toUpperCase()} ›`}
-                  {msg.isStreaming && <span className="status-dot status-dot-active" style={{ display: 'inline-block', marginLeft: 8, verticalAlign: 'middle' }} />}
-                </div>
-                {msg.role === 'assistant' && !msg.isStreaming && (
-                  <button 
+            <div
+              key={i}
+              className={`stream-in ${msg.role === 'user' ? 'msg-user' : 'msg-ai'}`}
+              style={{ width: msg.role === 'user' ? undefined : '100%', display: 'flex', flexDirection: 'column' }}
+            >
+              <div
+                className="msg-meta"
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%',
+                  color: msg.role === 'user' ? PALETTE.blue : PALETTE.nebulaGlow,
+                }}
+              >
+                <span>
+                  {msg.role === 'user' ? 'You' : modelName}
+                  {msg.isStreaming && (
+                    <span
+                      className="status-dot status-dot-active"
+                      style={{ display: 'inline-block', marginLeft: 8, verticalAlign: 'middle' }}
+                    />
+                  )}
+                </span>
+                {msg.role === 'assistant' && !msg.isStreaming && msg.content && (
+                  <button
+                    type="button"
                     onClick={() => handleCopyMessage(msg.content, i)}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: copiedId === i ? 'var(--accent-green)' : 'var(--text-dim)',
-                      fontSize: '9px',
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      transition: 'color 0.15s',
-                      padding: '2px 6px',
-                      borderRadius: '4px',
-                      background: copiedId === i ? 'rgba(90, 184, 122, 0.1)' : 'transparent'
-                    }}
+                    className="msg-copy"
+                    style={{ color: copiedIndex === i ? PALETTE.mint : undefined }}
+                    aria-label="Copy this reply"
                   >
-                    {copiedId === i ? '✓ COPIED' : '⧉ COPY'}
+                    {copiedIndex === i ? '✓ Copied' : 'Copy'}
                   </button>
                 )}
               </div>
+
               <div className={msg.role === 'user' ? 'msg-bubble-user' : 'msg-bubble-ai'}>
-                {msg.role === 'user' ? (
-                  msg.content
-                ) : (
+                {msg.role === 'user' ? msg.content : (
                   <>
-                    <div className="md-content">
-                      <Markdown remarkPlugins={[remarkGfm]} components={mdComponents()}>
-                        {msg.content || ''}
-                      </Markdown>
-                    </div>
+                    {msg.isStreaming && !msg.content ? (
+                      <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>Thinking…</span>
+                    ) : (
+                      <MarkdownMessage>{msg.content}</MarkdownMessage>
+                    )}
                     {msg.isStreaming && <span className="terminal-cursor" />}
                   </>
                 )}
@@ -425,38 +360,43 @@ export function ChatArena({ apiKey, models, selectedModelId, setSelectedModelId 
           <div ref={endRef} />
         </div>
 
-        {/* Input */}
+        {/* ── COMPOSER ──────────────────────────────────────────────────── */}
         <div className="input-row">
           <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', maxWidth: '900px', margin: '0 auto', width: '100%' }}>
             <div style={{ flex: 1, position: 'relative' }}>
-              <span style={{
-                position: 'absolute', left: '13px', top: '12px',
-                fontFamily: "'JetBrains Mono', monospace", fontSize: '12px',
-                color: 'var(--text-dim)', pointerEvents: 'none',
-              }}>›</span>
+              <span className="composer-caret" aria-hidden="true">›</span>
               <textarea
                 className="field-input"
                 value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={handleKey}
-                placeholder={isMobile ? "Type a message..." : "Type your message here... (Enter to send, Shift+Enter for newline)"}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                aria-label="Message"
+                placeholder={isMobile ? 'Message…' : 'Message — Enter to send, Shift+Enter for a new line'}
                 rows={Math.min(5, (input.match(/\n/g) || []).length + 1)}
                 style={{ paddingLeft: '28px', lineHeight: 1.5 }}
               />
             </div>
-            <button
-              className={`btn ${input.trim() && !isStreaming ? 'btn-primary' : ''}`}
-              onClick={handleSend}
-              disabled={!input.trim() || isStreaming}
-              style={{ height: '44px', padding: '0 22px', flexShrink: 0 }}
-            >
-              {isStreaming ? (
-                <>
-                  <span className="status-dot status-dot-active" />
-                  STREAMING
-                </>
-              ) : 'SEND ›'}
-            </button>
+
+            {isStreaming ? (
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={stop}
+                style={{ height: '44px', padding: '0 22px', flexShrink: 0 }}
+              >
+                <span className="stop-glyph" aria-hidden="true" /> Stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={`btn ${input.trim() ? 'btn-primary' : ''}`}
+                onClick={handleSend}
+                disabled={!input.trim() || !modelId}
+                style={{ height: '44px', padding: '0 22px', flexShrink: 0 }}
+              >
+                Send ›
+              </button>
+            )}
           </div>
         </div>
       </div>
