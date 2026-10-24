@@ -2310,3 +2310,7 @@ select.field-input:disabled {
   width: 100%;
 }
 
+
+code, pre, .stat-value, .metric-value, .token-count, .status-bar-item {
+  font-variant-numeric: tabular-nums;
+}
