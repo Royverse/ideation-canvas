@@ -9,6 +9,7 @@ export default defineConfig(({ mode }) => {
   const trialKey = env.NVIDIA_TRIAL_API_KEY
 
   return {
+    base: '/milkyway/',
     plugins: [react()],
     server: {
       port: 5173,
